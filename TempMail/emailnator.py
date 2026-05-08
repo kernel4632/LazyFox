@@ -154,6 +154,11 @@ class TempMail:
         try: return self.fetchMessageList(self.email)                                  # 返回完整邮件列表不做过滤
         except Exception: return []                                                    # 请求失败返回空列表
 
+    def getLatestMail(self):                                                           # 获取最新一封邮件，不区分新旧，适合做调试或读取已存在邮件
+        allMailList = self.listAll()                                                   # 直接读取完整邮件列表，避免被基线机制过滤掉旧邮件
+        if not allMailList: return None                                                # 没有邮件时返回空
+        return allMailList[0]                                                          # 服务端返回通常已按时间倒序排列，第一封就是最新邮件
+
     def clearMarks(self):                                                              # 清空所有已读和基线标记
         self.seenIds = set()                                                           # 重置已读集合
         self.baselineIds = set()                                                       # 重置基线集合

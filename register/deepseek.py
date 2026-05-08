@@ -10,6 +10,7 @@
 - 浏览器动作统一来自 tools/browser.py
 - 临时邮箱统一来自 TempMail/gptmail.py
 """
+
 import sys
 from pathlib import Path
 
@@ -29,7 +30,7 @@ import json
 import re
 import time
 
-from TempMail.gptmail import TempMail
+from TempMail.m2u import TempMail
 from tools.browser import Browser
 from tools.identity import Identity
 from tools.log import Log
@@ -148,9 +149,11 @@ class DeepSeekRegister:
         if not isOpened:
             raise RuntimeError("注册页面打开失败")
 
+        browser.sleep(3)  # 等待页面 JavaScript 完全渲染注册表单
+
         self.checkPhoneNumberMode(browser)
 
-        if not browser.show(EMAIL_INPUT, timeout=3000):
+        if not browser.show(EMAIL_INPUT, timeout=5000):
             raise RuntimeError("注册页面未找到邮箱输入框")
 
         logger.info("注册页面打开完成。")
@@ -200,6 +203,7 @@ class DeepSeekRegister:
             return ""
 
         codePatternList = [
+            r"验证码[：:]\s*\n\s*(\d{6})",  # DeepSeek 中文格式：验证码：\n\n737945
             r"verification code[^\d]{0,40}(\d{6})",
             r"code below[^\d]{0,40}(\d{6})",
             r"DeepSeek[^\d]{0,80}(\d{6})",
@@ -225,11 +229,12 @@ class DeepSeekRegister:
             return ""
 
         subjectText = str(mailItem.get("subject", ""))
-        messageId = str(mailItem.get("mailID", ""))
+        messageId = str(mailItem.get("mailID", mailItem.get("messageID", "")))  # 兼容 mailID 和 messageID 两种字段名
         bodyText = mail.readMessage(messageId)
         fullText = subjectText + "\n" + bodyText
 
         logger.info(f"正在检查邮件，主题: {subjectText}")
+        logger.info(f"邮件正文长度: {len(bodyText)} 字符")
         return self.extractVerifyCode(fullText)
 
     def waitVerifyCode(self, mail):
@@ -243,7 +248,7 @@ class DeepSeekRegister:
             latestMail = mail.getLatestMail()
 
             if latestMail:
-                latestFingerprint = str(latestMail.get("mailID", ""))
+                latestFingerprint = str(latestMail.get("mailID", latestMail.get("messageID", "")))
 
                 if latestFingerprint != latestMailFingerprint:
                     latestMailFingerprint = latestFingerprint
@@ -253,7 +258,8 @@ class DeepSeekRegister:
                         logger.info(f"邮箱验证码获取完成: {code}")
                         return code
 
-                    logger.warning("最新邮件存在，但暂时没有提取到验证码，继续等待。")
+                    logger.error("最新邮件存在，但无法提取到验证码，停止本轮注册。")
+                    raise RuntimeError(f"邮件主题: {latestMail.get('subject', '')}，但内容中未找到有效的验证码格式。")
                 else:
                     logger.info("最新邮件和上一轮相同，继续等待新验证码邮件。")
             else:
@@ -393,7 +399,7 @@ class DeepSeekRegister:
 
             with Browser(
                 engine="camoufox",
-                headless=True,
+                headless=False,
                 os="windows",
                 geoip=True,
                 humanize=False,
@@ -435,7 +441,6 @@ class DeepSeekRegister:
 def registerOneAccount():
     register = DeepSeekRegister()
     return register.registerOneAccount()
-
 
 
 def runRegisterFlow(accountCount=1):

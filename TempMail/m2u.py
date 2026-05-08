@@ -59,17 +59,28 @@ class TempMail:
 
     # ==================== 算子层 ====================
 
-    def sendRequest(self, method, path, params=None, body=None, headers=None):        # 发送标准 HTTP 请求
-        requestHeaders = {} if headers is None else dict(headers)                     # 复制请求头避免修改外部对象
-        response = self.client.request(                                               # 发起 HTTP 请求
-            method=method,                                                            # 请求方法如 GET / POST
-            url=self.apiUrl + path,                                                   # 拼接完整请求地址
-            params=params,                                                            # URL 查询参数
-            json=body,                                                                # JSON 请求体
-            headers=requestHeaders if requestHeaders else None,                       # 若传入额外头则覆盖合并
-        )
-        response.raise_for_status()                                                   # 请求失败时直接抛错方便定位问题
-        return response                                                               # 返回完整响应对象
+    def sendRequest(self, method, path, params=None, body=None, headers=None, retryCount=3):  # 发送标准 HTTP 请求
+        lastError = None                                                              # 记录最后一次错误用于最终抛错
+        for attempt in range(retryCount):                                             # 最多重试指定次数
+            try:
+                requestHeaders = {} if headers is None else dict(headers)             # 复制请求头避免修改外部对象
+                response = self.client.request(                                       # 发起 HTTP 请求
+                    method=method,                                                    # 请求方法如 GET / POST
+                    url=self.apiUrl + path,                                           # 拼接完整请求地址
+                    params=params,                                                    # URL 查询参数
+                    json=body,                                                        # JSON 请求体
+                    headers=requestHeaders if requestHeaders else None,               # 若传入额外头则覆盖合并
+                )
+                response.raise_for_status()                                           # 请求失败时直接抛错方便定位问题
+                return response                                                      # 返回完整响应对象
+            except (httpx.ConnectError, httpx.ReadTimeout) as e:                       # 网络临时错误（SSL中断、读取超时）时重试
+                lastError = e                                                        # 记录错误
+                if attempt < retryCount - 1:                                         # 不是最后一次尝试
+                    waitSeconds = 0.5 * (2 ** attempt)                              # 指数退避：0.5s, 1s, 2s...
+                    time.sleep(waitSeconds)                                           # 等待后重试
+                    continue                                                         # 继续下一次重试
+                break                                                                # 已达重试次数，退出循环
+        raise lastError if lastError else RuntimeError(f"请求失败: {method} {path}")  # 最终抛错
 
     def fetchMailbox(self):                                                           # 请求服务端自动创建一个临时邮箱
         response = self.sendRequest(                                                  # 调用自动创建邮箱接口
@@ -387,6 +398,11 @@ class TempMail:
             normalizedList.append(mail)                                               # 收集到结果列表
 
         return normalizedList                                                         # 返回完整邮件列表
+
+    def getLatestMail(self):                                                           # 获取最新一封邮件，不区分新旧，适合做调试或读取已存在邮件
+        allMailList = self.listAll()                                                   # 直接读取完整邮件列表，避免被基线机制过滤掉旧邮件
+        if not allMailList: return None                                                # 没有邮件时返回空
+        return allMailList[0]                                                          # 服务端返回通常已按时间倒序排列，第一封就是最新邮件
 
     def clearMarks(self):                                                             # 清空所有已读和基线标记
         self.seenIds = set()                                                          # 重置已读集合

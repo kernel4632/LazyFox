@@ -231,7 +231,7 @@ class DeepSeekRegister:
             latestMail = mail.getLatestMail()
 
             if latestMail:
-                latestFingerprint = str(latestMail.get("mailID", ""))
+                latestFingerprint = str(latestMail.get("mailID", latestMail.get("messageID", "")))
 
                 if latestFingerprint != latestMailFingerprint:
                     latestMailFingerprint = latestFingerprint
@@ -241,7 +241,8 @@ class DeepSeekRegister:
                         logger.info(f"邮箱验证码获取完成: {code}")
                         return code
 
-                    logger.warning("最新邮件存在，但暂时没有提取到验证码，继续等待。")
+                    logger.error("最新邮件存在，但无法提取到验证码，停止本轮注册。")
+                    raise RuntimeError(f"邮件主题: {latestMail.get('subject', '')}，但内容中未找到有效的验证码格式。")
                 else:
                     logger.info("最新邮件和上一轮相同，继续等待新验证码邮件。")
             else:
@@ -423,7 +424,6 @@ class DeepSeekRegister:
 def registerOneAccount():
     register = DeepSeekRegister()
     return register.registerOneAccount()
-
 
 
 def runRegisterFlow(accountCount=1):
