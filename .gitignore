@@ -98,5 +98,5 @@ config.yaml
 config.yml
 
 temp.py
-accounts.json
+accounts/
 token/

@@ -451,7 +451,7 @@ def runRegisterFlow(accountCount=1):
 if __name__ == "__main__":
     startTime = time.time()
     logger.info("deepseek 注册流程启动")
-    runRegisterFlow(accountCount=1)
+    runRegisterFlow(accountCount=105)
     endTime = time.time()
     duration = endTime - startTime
     logger.info(f"注册进程完成，耗时 {duration:.2f} 秒")
