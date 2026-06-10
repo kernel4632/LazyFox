@@ -1,27 +1,32 @@
 """
-Browser 类 - 智能浏览器自动化工具
+Browser 类 - 基于 nodriver 的智能浏览器自动化工具
 
-这是一个统一的浏览器自动化入口，封装了 Camoufox 和 Playwright Chromium 两种浏览器引擎，
-提供了更智能、更适合业务直接调用的 API。
+这是一个统一的浏览器自动化入口，封装了 nodriver 浏览器引擎，
+提供更智能、更适合业务直接调用的 API，同时具备更强的反检测能力。
+
+【核心优势】
+- 基于 nodriver，无需额外 WebDriver，直接与 Chrome/Chromium 通信
+- 内置强大的伪装能力，自动处理指纹、UA、语言等检测点
+- 简化的 API 设计，易于使用和理解
 
 【基本用法】
-```python
+python
 from browser import Browser
 
 # 方式1：使用 with 语句（推荐）
-with Browser(engine="playwright", headless=False) as browser:
+with Browser(headless=False) as browser:
     browser.goto("https://example.com")
     browser.click("#button")
     # 使用完毕自动关闭
 
 # 方式2：手动管理
-browser = Browser(engine="camoufox")
+browser = Browser()
 try:
     browser.goto("https://example.com")
     browser.fill("#input", "text")
 finally:
     browser.close()
-```
+
 
 【配置选项】
 BrowserConfig 类提供了以下可配置项：
@@ -34,11 +39,10 @@ BrowserConfig 类提供了以下可配置项：
 - waitTimeout: wait方法默认超时毫秒（默认10000）
 - typeDelay: 逐字输入间隔毫秒（默认80）
 - isDebug: 是否打印调试日志（默认True）
-- engine: 浏览器引擎 "camoufox" 或 "playwright"（默认"camoufox"）
 - headless: 是否无头运行（默认False）
 - viewportWidth: 视口宽度（默认1440）
 - viewportHeight: 视口高度（默认900）
-- userAgent: 自定义UA字符串（默认空）
+- userAgent: 自定义UA字符串（默认空，自动生成真实UA）
 
 【主要方法】
 1. 生命周期管理
@@ -66,7 +70,6 @@ BrowserConfig 类提供了以下可配置项：
    - blur(selector, **kwargs): 失焦
    - scroll(selector=None, position=None): 滚动页面
    - remove(selector, **kwargs): 移除元素
-   - setInputFiles(selector, filePath, **kwargs): 上传文件
 
 4. 元素查询
    - has(selector, **kwargs): 判断元素是否存在
@@ -95,83 +98,52 @@ BrowserConfig 类提供了以下可配置项：
 
 6. 工具方法
    - screenshot(path=None, **kwargs): 截图
-   - evaluate(script, arg=None): 执行JavaScript
+   - evaluate(script, arg=None): 执行JS脚本
+   - getTitle(): 获取页面标题
+   - getUrl(): 获取当前URL
    - sleep(seconds): 等待指定秒数
    - log(message): 打印日志
 
-【示例】
-```python
-# 基础操作
-browser.goto("https://example.com")
-browser.fill("#username", "admin")
-browser.fill("#password", "123456")
-browser.click("#login", showSelector="#dashboard")  # 点击后等待dashboard出现
+【反检测特性】
+- 自动隐藏 navigator.webdriver 属性
+- 自动设置真实的语言和时区
+- 模拟真实的硬件信息（内存、CPU核心数）
+- 动态生成逼真的用户代理字符串
+- 设置正确的平台信息
 
-# 智能重试
-browser.click("#submit", 
-              showSelector="#success",  # 等待成功提示出现
-              retryCount=3,             # 最多重试3次
-              retryInterval=1.0)        # 每次间隔1秒
-
-# 元素查询
-if browser.has("#notification"):
-    text = browser.getText("#notification")
-    print(f"通知内容: {text}")
-
-# 处理不稳定的选择器
-browser.click(["#button1", ".btn-primary", "[role='button']"])  # 自动尝试多个选择器
-
-# 等待条件
-browser.wait("#loading", state="hidden")  # 等待加载动画消失
-browser.wait(".item", countAtLeast=5)     # 等待至少5个item出现
-
-# 截图
-browser.screenshot("screenshot.png")
-
-# 执行JS
-title = browser.evaluate("() => document.title")
-```
-
-【返回值说明】
-- 操作类方法（click、fill等）：成功返回True，失败返回False
-- 查询类方法（has、getText等）：返回查询结果或默认值
-- 等待类方法（wait）：条件满足返回True，超时返回False
-- getPage(): 返回页面对象
-- screenshot(): 返回截图文件路径
-- evaluate(): 返回JS执行结果
-
-【注意事项】
-1. 使用with语句可以自动管理浏览器生命周期
-2. 智能模式下会自动重试，适合处理不稳定的页面
-3. 选择器支持字符串或列表，列表会自动尝试直到找到可用选择器
-4. 所有超时参数单位为毫秒
-5. 默认开启调试日志，可通过isDebug=False关闭
+【开发者提示】
+- 所有方法都有完善的日志输出，开启 isDebug=True 可查看详细执行过程
+- 智能重试机制会自动处理网络波动和元素加载延迟
+- 建议使用 with 语句管理浏览器生命周期，确保资源正确释放
+- 复杂操作建议使用智能参数进行结果验证，提高稳定性
 """
-from dataclasses import dataclass                                                     # dataclass 用来保存配置，结构简单清楚
-from typing import Any, Optional                                                      # 这里只保留常见类型提示，避免复杂度过高
-import time                                                                           # 用于短暂 sleep 和重试间隔
-from pathlib import Path                                                              # 用于处理上传文件路径
 
-from camoufox.sync_api import Camoufox                                                # Camoufox 同步 API，作为一个可选后端
-from playwright.sync_api import sync_playwright                                       # Playwright 同步入口，用于 Chromium 后端
+from dataclasses import dataclass, field
+from typing import Any, Optional, List, Dict, Tuple, Callable, Union
+import time
+import random
+import asyncio
+
+from nodriver import Tab, start, Element
 
 
 @dataclass
 class BrowserConfig:
-    clickRetryCount: int = 3                                                          # click 默认重试次数。点击类动作最容易遇到页面没反应
-    actionRetryCount: int = 2                                                         # 非点击动作默认重试次数。克制一点，避免重复执行太多次
-    retryInterval: float = 1.0                                                        # 两次动作之间默认等待秒数。太短页面可能还没反应过来
-    actionTimeout: int = 8000                                                         # 普通动作超时，单位毫秒。给元素出现和动作执行一点时间
-    resultTimeout: int = 2500                                                         # 动作后等结果的默认时间，单位毫秒。偏短，方便进入下一轮重试
-    gotoTimeout: int = 30000                                                          # 打开页面通常更慢，所以给更长超时
-    waitTimeout: int = 10000                                                          # wait 系列方法的默认超时
-    typeDelay: int = 80                                                               # 逐字输入时每个字符的间隔，单位毫秒
-    isDebug: bool = True                                                              # 是否打印调试日志
-    engine: str = "camoufox"                                                          # 浏览器后端类型，可选 camoufox 或 playwright
-    headless: bool = False                                                            # 默认是否无头运行，仅对 playwright 明确生效，也透传给 camoufox
-    viewportWidth: int = 1440                                                         # Playwright 默认视口宽度
-    viewportHeight: int = 900                                                         # Playwright 默认视口高度
-    userAgent: str = ""                                                               # 可选自定义 UA，不传则使用浏览器默认 UA
+    """浏览器配置类"""
+
+    clickRetryCount: int = 3  # 点击动作默认重试次数
+    actionRetryCount: int = 2  # 非点击动作默认重试次数
+    retryInterval: float = 1.0  # 重试间隔秒数
+    actionTimeout: int = 8000  # 普通动作超时毫秒
+    resultTimeout: int = 2500  # 动作后等待结果超时毫秒
+    gotoTimeout: int = 30000  # 打开页面超时毫秒
+    waitTimeout: int = 10000  # wait方法默认超时毫秒
+    typeDelay: int = 80  # 逐字输入间隔毫秒
+    isDebug: bool = True  # 是否打印调试日志
+    headless: bool = False  # 是否无头运行
+    viewportWidth: int = 1440  # 默认视口宽度
+    viewportHeight: int = 900  # 默认视口高度
+    userAgent: str = ""  # 自定义UA，空则自动生成
 
 
 class Browser:
@@ -182,302 +154,212 @@ class Browser:
         autoStart: bool = True,
         **browserArgs,
     ):
-        print("正在初始化 Browser。")                                                  # 初始化开始时打印，方便定位启动阶段问题
+        print("正在初始化 Browser。")
 
-        self.config = config or BrowserConfig()                                       # 没传配置就使用默认配置，保持最少心智负担
-        self.browserArgs = browserArgs                                                # 保存底层浏览器启动参数，后面 start 时会直接使用
+        self.config = config or BrowserConfig()
+        self.browserArgs = browserArgs
 
-        self.engine = str(self.browserArgs.pop("engine", self.config.engine)).lower() # 优先使用显式传入 engine，否则走配置默认值
-        self.headless = self.browserArgs.pop("headless", self.config.headless)        # headless 支持从外部参数覆盖配置默认值
+        self.headless = self.browserArgs.pop("headless", self.config.headless)
+        self.viewportWidth = self.browserArgs.pop("viewportWidth", self.config.viewportWidth)
+        self.viewportHeight = self.browserArgs.pop("viewportHeight", self.config.viewportHeight)
+        self.userAgent = self.browserArgs.pop("userAgent", self.config.userAgent)
 
-        self.camoufoxContext = None                                                   # 保存 Camoufox(...) 返回的上下文对象，后面需要手动 __enter__ / __exit__
-        self.rawBrowser = None                                                        # 保存底层浏览器对象或上下文对象
-        self.page = page                                                              # 如果外部已经传了 page，就直接接管，不重复创建
-        self.isStarted = page is not None                                             # 只要外部传了 page，就视为已启动
+        self.tab = page
+        self.isStarted = page is not None
+        self.browser = None
+        self._loop = None
 
-        self.playwrightDriver = None                                                  # Playwright 启动器对象，即 sync_playwright().start() 的返回值
-        self.playwrightBrowser = None                                                 # Playwright 浏览器实例，比如 chromium.launch(...) 的结果
-        self.playwrightContext = None                                                 # Playwright BrowserContext，上下文级别资源
-        self.ownsExternalPage = page is not None                                      # 外部传入 page 时，当前 Browser 不负责关闭底层浏览器
-
-        if autoStart and self.page is None:                                           # 默认自动启动，这样 import 后可以直接用，最符合 UOP
+        if autoStart and self.tab is None:
             self.start()
 
-        print("Browser 初始化完成。")                                                  # 初始化完成后打印，说明 Browser 已经准备好了
-
-    # ==================== 生命周期管理 ====================
+        print("Browser 初始化完成。")
 
     def __enter__(self):
-        if not self.isStarted or self.page is None:                                   # with 进入时如果还没启动，就自动启动
+        if not self.isStarted or self.tab is None:
             self.start()
-        return self                                                                   # 返回自己，外部自然使用 browser.click(...) 这样的写法
+        return self
 
     def __exit__(self, excType, excValue, traceback):
-        self.close()                                                                  # with 结束时自动关闭，保证资源释放
+        self.close()
+
+    def _run_async(self, coroutine):
+        """在共享事件循环中运行异步操作"""
+        try:
+            if self._loop is not None and not self._loop.is_closed():
+                return self._loop.run_until_complete(coroutine)
+            else:
+                return asyncio.run(coroutine)
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                self._loop = asyncio.new_event_loop()
+                return self._loop.run_until_complete(coroutine)
+            raise
 
     def start(self):
-        if self.isStarted and self.page is not None:                                  # 已经启动且 page 可用时，不重复启动
+        if self.isStarted and self.tab is not None:
             self.log("Browser 已经启动，跳过重复启动。")
             return self
 
-        if self.engine == "camoufox":                                                 # 走 Camoufox 后端启动流程
-            self._startCamoufox()
-            return self
-
-        if self.engine in ("playwright", "chromium"):                                 # 走 Playwright Chromium 后端启动流程
-            self._startPlaywright()
-            return self
-
-        raise RuntimeError(f"不支持的浏览器引擎: {self.engine}")                      # 未知引擎直接报错，避免静默退回错误路径
-
-    def _startCamoufox(self):
-        self.log("正在启动 Camoufox。")                                               # 启动 Camoufox 前先打印日志，让流程清楚
-
-        camoufoxArgs = dict(self.browserArgs)                                         # 复制参数，避免污染外部传入对象
-        if "headless" not in camoufoxArgs:                                            # 如果外部没显式传 headless
-            camoufoxArgs["headless"] = self.headless                                  # 就使用统一配置中的 headless 值
-
-        self.camoufoxContext = Camoufox(**camoufoxArgs)                               # 创建 Camoufox 上下文对象，这一步还没真正进入 with
-        self.rawBrowser = self.camoufoxContext.__enter__()                            # 手动进入上下文，这样非 with 场景也能统一复用
-        self.page = self.rawBrowser.new_page()                                        # 启动后立刻创建 page，后面所有业务方法都围绕这个 page 工作
-        self.isStarted = True                                                         # 标记为已启动，避免后续重复创建
-
-        self.log("Camoufox 启动完成，page 已创建。")                                   # 打印启动完成日志
-
-    def _startPlaywright(self):
-        self.log("正在启动 Playwright Chromium。")                                     # 启动 Chromium 前先打印日志
-
-        playwrightArgs = dict(self.browserArgs)                                       # 复制参数，避免污染外部传入对象
-        launchArgs = playwrightArgs.pop("launchArgs", {})                             # 允许调用方额外传 launchArgs 定制 browser.launch 参数
-        contextArgs = playwrightArgs.pop("contextArgs", {})                           # 允许调用方额外传 contextArgs 定制 new_context 参数
-
-        self.playwrightDriver = sync_playwright().start()                             # 启动 Playwright 驱动进程
-        self.playwrightBrowser = self.playwrightDriver.chromium.launch(               # 启动 Chromium 浏览器实例
-            headless=self.headless,                                                   # 是否无头运行
-            **launchArgs,                                                             # 额外启动参数透传给 launch
-        )
-
-        if "viewport" not in contextArgs:                                             # 如果调用方没显式指定 viewport
-            contextArgs["viewport"] = {                                               # 就使用配置里的默认视口
-                "width": self.config.viewportWidth,
-                "height": self.config.viewportHeight,
-            }
-
-        if self.config.userAgent and "user_agent" not in contextArgs:                 # 如果配置了 UA 且调用方没覆盖
-            contextArgs["user_agent"] = self.config.userAgent                         # 把自定义 UA 注入到上下文中
-
-        self.playwrightContext = self.playwrightBrowser.new_context(                  # 创建一个独立浏览器上下文
-            **contextArgs,                                                            # 透传上下文创建参数
-        )
-        self.rawBrowser = self.playwrightBrowser                                      # rawBrowser 统一指向底层浏览器实例，方便调试时查看
-        self.page = self.playwrightContext.new_page()                                 # 创建业务 page，后续智能方法仍然统一操作 self.page
-        self.isStarted = True                                                         # 标记为已启动
-
-        self.log("Playwright Chromium 启动完成，page 已创建。")                        # 打印启动完成日志
-
-    def close(self) -> bool:
-        self.log("正在关闭 Browser。")                                                 # 关闭前打印日志，明确生命周期结束点
+        self.log("正在启动 nodriver 浏览器。")
 
         try:
-            if self.page and hasattr(self.page, "close"):                             # 先关 page，这样更稳
-                try:
-                    self.page.close()
-                except Exception:
-                    pass                                                              # page 关闭失败时继续往下收尾，尽量释放整体资源
+            self._loop = asyncio.new_event_loop()
+            self.browser = self._loop.run_until_complete(start(headless=self.headless, user_agent=self.userAgent or self._generateRealisticUA(), viewport={"width": self.viewportWidth, "height": self.viewportHeight}, **self.browserArgs))
 
-            if self.engine == "camoufox":                                             # Camoufox 的资源释放逻辑
-                if self.camoufoxContext is not None:                                  # Camoufox 是上下文管理器，所以这里对称调用 __exit__
-                    try:
-                        self.camoufoxContext.__exit__(None, None, None)
-                    except Exception:
-                        pass                                                          # 底层关闭失败时也尽量吞掉，避免收尾阶段炸掉主流程
+            # 使用 tabs 列表获取主页面，而不是有 bug 的 main_tab 属性
+            if self.browser.tabs and len(self.browser.tabs) > 0:
+                self.tab = self.browser.tabs[0]
+            else:
+                raise RuntimeError("无法获取主页面标签")
 
-            elif self.engine in ("playwright", "chromium"):                           # Playwright Chromium 的资源释放逻辑
-                if self.playwrightContext is not None:                                # 先关 context
-                    try:
-                        self.playwrightContext.close()
-                    except Exception:
-                        pass
+            self.isStarted = True
 
-                if self.playwrightBrowser is not None:                                # 再关 browser
-                    try:
-                        self.playwrightBrowser.close()
-                    except Exception:
-                        pass
-
-                if self.playwrightDriver is not None:                                 # 最后停掉 Playwright 驱动
-                    try:
-                        self.playwrightDriver.stop()
-                    except Exception:
-                        pass
-
-            self.page = None                                                          # 清空引用，避免后面误用已关闭对象
-            self.rawBrowser = None                                                    # 清空真实浏览器对象引用
-            self.camoufoxContext = None                                               # 清空 Camoufox 上下文对象引用
-            self.playwrightDriver = None                                              # 清空 Playwright 驱动引用
-            self.playwrightBrowser = None                                             # 清空 Playwright browser 引用
-            self.playwrightContext = None                                             # 清空 Playwright context 引用
-            self.isStarted = False                                                    # 状态归零，表示当前实例已关闭
-
-            self.log("Browser 已关闭。")
-            return True
+            self._applyAntiDetection()
+            self.log("nodriver 浏览器启动完成。")
         except Exception as error:
-            self.log(f"close 失败：{error}")
-            return False
+            self.log(f"浏览器启动失败：{error}")
+            raise
 
-    def ensurePage(self):
-        if self.page is not None:                                                     # 已经有 page 时直接返回，这是最常见路径
-            return self.page
+        return self
 
-        if not self.isStarted:                                                        # 没启动就先启动，让调用方不需要关心启动时机
-            self.start()
+    def _generateRealisticUA(self):
+        """生成逼真的 Chrome UA 字符串"""
+        versions = [
+            "120.0.6099.109",
+            "121.0.6167.139",
+            "122.0.6261.112",
+            "123.0.6312.106",
+            "124.0.6367.60",
+        ]
+        osInfo = [
+            "(Windows NT 10.0; Win64; x64)",
+            "(Windows NT 10.0; WOW64)",
+            "(Windows NT 11.0; Win64; x64)",
+        ]
+        version = random.choice(versions)
+        os = random.choice(osInfo)
+        return f"Mozilla/5.0 {os} AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
 
-        if self.page is None:                                                         # 启动后仍然没有 page，说明底层启动流程真的出了问题
-            raise RuntimeError("Browser.page 不可用，请检查浏览器启动流程。")
+    def _applyAntiDetection(self):
+        """应用反检测措施"""
+        self.log("正在应用反检测配置...")
 
-        return self.page
+        self._run_async(self.tab.evaluate("Object.defineProperty(navigator, 'language', {get: () => 'zh-CN'});"))
+        self._run_async(self.tab.evaluate("Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});"))
+        self._run_async(self.tab.evaluate("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"))
+        self._run_async(self.tab.evaluate("window.chrome = {runtime: {}};"))
+        self._run_async(self.tab.evaluate("Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});"))
+        self._run_async(
+            self.tab.evaluate("""
+            Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+            Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+        """)
+        )
 
-    # ==================== 基础工具 ====================
+        self.log("反检测配置应用完成。")
+
+    def close(self):
+        """关闭浏览器
+
+        使用 nodriver 内置的 stop() 方法关闭，它已经处理了异步关闭和进程终止的兜底。
+        不要用 _run_async 包装 aclose()，因为 aclose 内部关闭 websocket 会破坏事件循环导致 Event loop is closed。
+        """
+        if self.browser:
+            try:
+                self.browser.stop()
+                self.log("浏览器已关闭。")
+            except Exception as error:
+                self.log(f"stop() 关闭出错，尝试直接终止进程：{error}")
+                try:
+                    if self.browser._process and self.browser._process.returncode is None:
+                        self.browser._process.terminate()
+                except Exception:
+                    pass
+        self.isStarted = False
+        self.tab = None
+        self.browser = None
+        if self._loop:
+            try:
+                self._loop.close()
+            except:
+                pass
+        self._loop = None
 
     def log(self, message: str):
-        if not self.config.isDebug:                                                   # 关闭调试日志时直接不打印
-            return
-
-        print(message)                                                                # 调试模式下打印日志，便于看清整个动作链
+        """打印日志"""
+        if self.config.isDebug:
+            print(f"[Browser] {message}")
 
     def sleep(self, seconds: float):
-        self.log(f"等待 {seconds} 秒。")                                               # 主动说明程序为什么在等，避免“看起来像卡住”
-        time.sleep(seconds)                                                           # 真正执行等待
+        """等待指定秒数"""
+        self.log(f"等待 {seconds} 秒。")
+        time.sleep(seconds)
+
+    def ensurePage(self) -> Tab:
+        """确保页面可用"""
+        if self.tab is None:
+            self.start()
+        return self.tab
 
     def getPage(self):
-        return self.ensurePage()                                                      # 对外暴露 page，但仍然保证 page 一定已准备好
+        """获取当前页面对象"""
+        return self.ensurePage()
 
-    def getTimeout(self, timeout: Optional[int], defaultValue: int) -> int:
-        return timeout if timeout is not None else defaultValue                       # 调用方有传就优先用传入值，没传才走默认值
+    def getTitle(self) -> str:
+        """获取页面标题"""
+        page = self.ensurePage()
+        # 使用 JavaScript 获取实时标题，因为 page.title 属性不会自动更新
+        try:
+            return self._run_async(page.evaluate("document.title")) or page.title
+        except:
+            return page.title
 
-    def getRetryCount(self, retryCount: Optional[int], actionName: str) -> int:
-        if retryCount is not None:                                                    # 调用方明确指定了重试次数时，优先尊重调用方
+    def getUrl(self) -> str:
+        """获取当前URL"""
+        page = self.ensurePage()
+        # 使用 JavaScript 获取实时URL，因为 page.url 属性不会自动更新
+        try:
+            return self._run_async(page.evaluate("document.URL")) or page.url
+        except:
+            return page.url
+
+    def normalizeSelector(self, selector: Any, timeout: Optional[int] = None) -> str:
+        """标准化选择器"""
+        if isinstance(selector, str):
+            return selector
+        if hasattr(selector, "__str__"):
+            return str(selector)
+        raise RuntimeError(f"无效 selector: {selector}")
+
+    def getTimeout(self, timeout: Optional[int], default: int) -> int:
+        """获取超时时间"""
+        return timeout if timeout is not None else default
+
+    def getRetryCount(self, retryCount: Optional[int], actionType: str) -> int:
+        """获取重试次数"""
+        if retryCount is not None:
             return retryCount
-
-        if actionName == "click":                                                     # click 最容易遇到“点了没反应”，默认多给点机会
-            return self.config.clickRetryCount
-
-        return self.config.actionRetryCount                                           # 其他动作默认更保守一点
+        return self.config.clickRetryCount if actionType == "click" else self.config.actionRetryCount
 
     def getRetryInterval(self, retryInterval: Optional[float]) -> float:
-        return retryInterval if retryInterval is not None else self.config.retryInterval  # 没传就走统一默认间隔
+        """获取重试间隔"""
+        return retryInterval if retryInterval is not None else self.config.retryInterval
 
     def hasSmartRule(
         self,
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
-        textContains: Optional[str] = None,
-        valueIs: Optional[str] = None,
-        countIs: Optional[int] = None,
-        countAtLeast: Optional[int] = None,
-        titleContains: Optional[str] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
+        showSelector: Any = None,
+        hideSelector: Any = None,
+        urlContains: str = None,
+        textContains: str = None,
+        titleContains: str = None,
+        valueIs: str = None,
+        countIs: int = None,
+        countAtLeast: int = None,
+        retryCount: int = None,
+        retryInterval: float = None,
     ) -> bool:
-        return any(
-            [
-                showSelector,                                                         # 点击或输入后等某个元素出现
-                hideSelector,                                                         # 点击或输入后等某个元素消失
-                urlContains,                                                          # 地址包含某段文本
-                textContains,                                                         # 页面文本包含某段内容
-                valueIs is not None,                                                  # 输入框值等于目标值
-                countIs is not None,                                                  # 元素数量正好等于目标数量
-                countAtLeast is not None,                                             # 元素数量至少达到目标数量
-                titleContains,                                                        # 页面标题包含目标文本
-                retryCount is not None,                                               # 明确传了重试次数，也说明调用者希望走增强流程
-                retryInterval is not None,                                            # 明确传了重试间隔，也说明调用者希望走增强流程
-            ]
-        )
-
-    # ==================== selector 统一处理 ====================
-
-    def getBestSelector(self, selector: Any, timeout: Optional[int] = None) -> Optional[str]:
-        if isinstance(selector, str):                                                 # 传单个字符串时，直接返回，不做额外处理
-            return selector
-
-        if not isinstance(selector, list):                                            # 不是字符串也不是列表时，说明 selector 结构不对
-            return None
-
-        timeout = self.getTimeout(timeout, 600)                                       # 试探候选选择器时用很短超时，避免拖慢整体流程
-
-        for oneSelector in selector:                                                  # 依次尝试每个候选选择器，找到第一个真实存在的
-            if not oneSelector:                                                       # 空值直接跳过
-                continue
-
-            try:
-                if self.has(oneSelector, state="attached", timeout=timeout):          # 找到挂在 DOM 上的选择器就足够了
-                    return oneSelector
-            except Exception:
-                continue                                                               # 某个选择器写法异常时直接跳过，不让整个流程中断
-
-        return selector[0] if selector else None                                      # 都没判断出来时，退回第一个，保留原始意图
-
-    def normalizeSelector(self, selector: Any, timeout: Optional[int] = None) -> str:
-        bestSelector = self.getBestSelector(selector, timeout=timeout)                 # 把字符串或候选列表都收束成一个真实要用的 selector
-
-        if not bestSelector:                                                          # 找不到可用 selector 时直接报清楚错误，避免后面全链路都是奇怪异常
-            raise RuntimeError(f"无效 selector: {selector}")
-
-        return bestSelector
-
-    def getLocator(self, selector: Any, timeout: Optional[int] = None):
-        page = self.ensurePage()                                                      # 每次拿 locator 前先保证 page 已可用
-        selector = self.normalizeSelector(selector, timeout=timeout)                   # 统一把 selector 处理成最终可用字符串
-        return page.locator(selector).first                                           # 统一使用 first，避免匹配多个元素时行为不稳定
-
-    # ==================== 页面状态与等待 ====================
-
-    def isPageReady(self) -> bool:
-        page = self.ensurePage()                                                      # 读取页面状态前先保证 page 可用
-
-        try:
-            state = page.evaluate("document.readyState")                              # 读取浏览器原生 readyState，判断页面是否基本可操作
-            return state in ["interactive", "complete"]                               # interactive 表示 DOM 可用了，complete 表示页面基本加载完
-        except Exception:
-            return False                                                              # 读取失败时直接返回 False，让外层逻辑决定是否继续等
-
-    def waitPageReady(self, timeout: Optional[int] = None) -> bool:
-        timeout = self.getTimeout(timeout, self.config.waitTimeout)                    # 没传 timeout 就用统一 wait 默认值
-        endTime = time.time() + timeout / 1000                                        # 换算成结束时间，后面循环判断更直观
-
-        self.log("正在等待页面进入可操作状态。")                                        # 告诉调用方当前为什么在等
-
-        while time.time() < endTime:                                                  # 用短轮询判断 readyState 是否变好
-            if self.isPageReady():
-                self.log("页面已经进入可操作状态。")
-                return True
-
-            time.sleep(0.2)                                                           # 每次稍等一点，给页面推进状态的时间
-
-        self.log("等待页面可操作状态超时。")
-        return False
-
-    def has(
-        self,
-        selector: Any,
-        state: str = "visible",
-        timeout: Optional[int] = None,
-    ) -> bool:
-        if not selector:                                                              # 没有 selector 时没有检查意义
-            self.log("has 检查失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)                  # 判断类方法默认用较短超时，避免拖沓
-
-        try:
-            self.getLocator(selector, timeout=timeout).wait_for(state=state, timeout=timeout)  # 直接等到底层状态成立
-            return True
-        except Exception:
-            return False                                                              # 判断类方法返回布尔值更好用，不抛异常
-
-    def show(self, selector: Any, timeout: Optional[int] = None) -> bool:
-        return self.has(selector, state="visible", timeout=timeout)                    # show 本质上就是“元素可见”
+        """判断是否有智能规则"""
+        return any([showSelector, hideSelector, urlContains, textContains, titleContains, valueIs, countIs, countAtLeast, retryCount is not None, retryInterval is not None])
 
     def wait(
         self,
@@ -488,56 +370,62 @@ class Browser:
         countAtLeast: Optional[int] = None,
         textContains: Optional[str] = None,
     ) -> bool:
-        if not selector:                                                              # 没 selector 就不知道要等谁
-            self.log("wait 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.waitTimeout)                    # wait 默认比普通结果等待更长
-        endTime = time.time() + timeout / 1000                                        # 统一换算结束时间
+        """等待元素满足条件"""
+        timeout = self.getTimeout(timeout, self.config.waitTimeout)
+        endTime = time.time() + timeout / 1000
+        selector = self.normalizeSelector(selector, timeout=timeout)
 
         self.log(f"正在等待元素状态：{selector}")
 
         while time.time() < endTime:
-            if countIs is not None:                                                   # 需要等待精确数量时，优先走数量判断
-                currentCount = self.count(selector)
-                if currentCount == countIs:
-                    self.log(f"等待成功：元素数量已经等于 {countIs}。")
+            if countIs is not None:
+                if self.count(selector) == countIs:
                     return True
-
-            elif countAtLeast is not None:                                            # 需要等待至少多少个时，走最小数量判断
-                currentCount = self.count(selector)
-                if currentCount >= countAtLeast:
-                    self.log(f"等待成功：元素数量已经达到 {currentCount}。")
+            elif countAtLeast is not None:
+                if self.count(selector) >= countAtLeast:
                     return True
-
-            elif textContains is not None:                                            # 需要等待文本内容时，轮询当前文本
-                text = self.getText(selector, defaultValue="")
-                if textContains in text:
-                    self.log("等待成功：元素文本已经包含目标内容。")
+            elif textContains is not None:
+                text = self.getText(selector, timeout=300)
+                if text and textContains in text:
                     return True
-
-            else:                                                                     # 普通情况就等元素状态成立
-                if self.has(selector, state=state, timeout=300):
-                    self.log(f"等待成功：元素状态已经满足 -> {state}")
-                    return True
-
-            time.sleep(0.2)                                                           # 每轮稍等一点，避免 CPU 空转，也让页面有时间变化
+            elif self.has(selector, state=state, timeout=300):
+                return True
+            time.sleep(0.1)
 
         self.log("wait 超时。")
         return False
 
+    def has(self, selector: Any, state: str = "attached", timeout: Optional[int] = None) -> bool:
+        """判断元素是否存在"""
+        timeout = self.getTimeout(timeout, self.config.resultTimeout)
+
+        try:
+            element = self.getLocator(selector, timeout=timeout)
+            if element:
+                if state == "visible":
+                    return self._run_async(element.is_visible(timeout=timeout / 1000))
+                return True
+            return False
+        except Exception:
+            return False
+
+    def show(self, selector: Any, timeout: Optional[int] = None) -> bool:
+        return self.has(selector, state="visible", timeout=timeout)
+
     def count(self, selector: Any) -> int:
-        if not selector:                                                              # 没 selector 没法统计
+        """统计元素数量"""
+        if not selector:
             self.log("count 失败：selector 为空。")
             return 0
 
-        page = self.ensurePage()                                                      # 统计前先保证 page 可用
-        selector = self.normalizeSelector(selector, timeout=300)                       # 把候选 selector 收束成最终 selector
+        page = self.ensurePage()
+        selector = self.normalizeSelector(selector, timeout=300)
 
         try:
-            return page.locator(selector).count()                                     # 直接返回命中数量
+            elements = self._run_async(page.select_all(selector, timeout=0.3))
+            return len(elements) if elements else 0
         except Exception:
-            return 0                                                                  # 统计失败时返回 0，更适合自动化流程里的条件判断
+            return 0
 
     def getText(
         self,
@@ -546,38 +434,37 @@ class Browser:
         defaultValue: str = "",
         isStrip: bool = True,
     ) -> str:
-        if not selector:                                                              # 没目标就没法取文本
+        """获取元素文本"""
+        if not selector:
             self.log("getText 失败：selector 为空。")
             return defaultValue
 
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)                  # 取文本前先短等一下元素出现
+        timeout = self.getTimeout(timeout, self.config.resultTimeout)
 
         if not self.has(selector, timeout=timeout):
-            return defaultValue                                                       # 元素没出来时直接返回默认值，不抛异常
+            return defaultValue
 
         try:
-            text = self.getLocator(selector, timeout=timeout).inner_text(timeout=timeout)  # inner_text 更接近用户实际看到的文本
-            return text.strip() if isStrip else text                                  # 默认去掉首尾空白，让数据更干净
+            element = self.getLocator(selector, timeout=timeout)
+            text = element.text if element else ""
+            return text.strip() if isStrip else text
         except Exception:
             return defaultValue
 
-    def getValue(
-        self,
-        selector: Any,
-        timeout: Optional[int] = None,
-        defaultValue: str = "",
-    ) -> str:
-        if not selector:                                                              # 没目标就没法取输入值
+    def getValue(self, selector: Any, timeout: Optional[int] = None, defaultValue: str = "") -> str:
+        """获取输入框值"""
+        if not selector:
             self.log("getValue 失败：selector 为空。")
             return defaultValue
 
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)                  # 读取输入值前给元素一点出现时间
+        timeout = self.getTimeout(timeout, self.config.resultTimeout)
 
         if not self.has(selector, timeout=timeout):
             return defaultValue
 
         try:
-            return self.getLocator(selector, timeout=timeout).input_value(timeout=timeout)  # input_value 专门用于取输入框值
+            element = self.getLocator(selector, timeout=timeout)
+            return self._run_async(element.get_attribute("value")) if element else defaultValue
         except Exception:
             return defaultValue
 
@@ -588,219 +475,100 @@ class Browser:
         defaultValue: str = "",
         isOuter: bool = False,
     ) -> str:
-        if not selector:                                                              # 没目标就没法取 HTML
+        """获取元素HTML"""
+        if not selector:
             self.log("getHtml 失败：selector 为空。")
             return defaultValue
 
         timeout = self.getTimeout(timeout, self.config.resultTimeout)
 
-        if not self.has(selector, state="attached", timeout=timeout):                  # 取 HTML 不要求可见，只要求在 DOM 上
+        if not self.has(selector, state="attached", timeout=timeout):
             return defaultValue
 
         try:
-            if isOuter:
-                return self.getLocator(selector, timeout=timeout).evaluate("node => node.outerHTML")  # outerHTML 包含元素自己本身
-            return self.getLocator(selector, timeout=timeout).evaluate("node => node.innerHTML")      # innerHTML 只包含内部内容
+            element = self.getLocator(selector, timeout=timeout)
+            return self._run_async(element.get_html()) if element else defaultValue
         except Exception:
             return defaultValue
 
     def isChecked(self, selector: Any, timeout: Optional[int] = None) -> bool:
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)                  # 勾选状态判断前先短等元素出现
+        """判断复选框是否勾选"""
+        timeout = self.getTimeout(timeout, self.config.resultTimeout)
 
         if not self.has(selector, timeout=timeout):
             return False
 
         try:
-            return self.getLocator(selector, timeout=timeout).is_checked(timeout=timeout)  # 交给底层来判断是否已勾选
+            element = self.getLocator(selector, timeout=timeout)
+            return self._run_async(element.is_checked()) if element else False
         except Exception:
             return False
 
     def isDisabled(self, selector: Any, timeout: Optional[int] = None) -> bool:
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)                  # 禁用状态判断前先短等元素出现
+        """判断元素是否禁用"""
+        timeout = self.getTimeout(timeout, self.config.resultTimeout)
 
         if not self.has(selector, timeout=timeout):
             return False
 
         try:
-            return self.getLocator(selector, timeout=timeout).is_disabled(timeout=timeout)  # 交给底层判断是否禁用
+            element = self.getLocator(selector, timeout=timeout)
+            return self._run_async(element.get_attribute("disabled")) is not None if element else False
         except Exception:
             return False
 
     def find(self, selector: Any, timeout: Optional[int] = None):
-        if not selector:                                                              # 没 selector 就没法找元素
+        """查找元素"""
+        if not selector:
             self.log("find 失败：selector 为空。")
             return None
 
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)                  # find 前短等一下元素存在
+        timeout = self.getTimeout(timeout, self.config.resultTimeout)
 
         if not self.has(selector, state="attached", timeout=timeout):
             self.log(f"find 失败：元素未出现 -> {selector}")
             return None
 
         try:
-            return self.getLocator(selector, timeout=timeout)                          # 返回 locator，供高级用法直接使用
+            return self.getLocator(selector, timeout=timeout)
         except Exception as error:
             self.log(f"find 失败：{error}")
             return None
 
-    # ==================== 统一结果判定引擎 ====================
+    def getLocator(self, selector: Any, timeout: Optional[int] = None):
+        """获取元素定位器"""
+        page = self.ensurePage()
+        selector = self.normalizeSelector(selector, timeout=timeout)
+        return self._run_async(page.select_one(selector, timeout=timeout / 1000))
 
-    def isSmartSuccess(
-        self,
-        selector: Optional[Any] = None,
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
-        textContains: Optional[str] = None,
-        valueIs: Optional[str] = None,
-        countIs: Optional[int] = None,
-        countAtLeast: Optional[int] = None,
-        titleContains: Optional[str] = None,
-        timeout: Optional[int] = None,
-    ) -> bool:
-        page = self.ensurePage()                                                      # 结果判断时也必须保证 page 存在
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)                  # 没传就走统一结果等待超时
+    def isPageReady(self) -> bool:
+        """检查页面是否就绪"""
+        page = self.ensurePage()
+        try:
+            state = self._run_async(page.evaluate("document.readyState"))
+            return state in ["interactive", "complete"]
+        except Exception:
+            return False
 
-        self.log("正在检查动作结果。")                                                 # 这是智能模式里的关键步骤，必须留日志
+    def waitPageReady(self, timeout: Optional[int] = None) -> bool:
+        """等待页面进入可操作状态"""
+        timeout = self.getTimeout(timeout, self.config.waitTimeout)
+        endTime = time.time() + timeout / 1000
 
-        if not any([showSelector, hideSelector, urlContains, textContains, valueIs is not None, countIs is not None, countAtLeast is not None, titleContains]):
-            self.log("没有提供智能结果条件，默认认为动作成功。")                         # 没有结果条件时，不人为制造失败
-            return True
+        self.log("正在等待页面进入可操作状态。")
 
-        if showSelector and self.has(showSelector, timeout=timeout):
-            self.log(f"结果成功：目标元素已出现 -> {showSelector}")
-            return True
-
-        if hideSelector and self.has(hideSelector, state="hidden", timeout=timeout):
-            self.log(f"结果成功：目标元素已隐藏 -> {hideSelector}")
-            return True
-
-        if urlContains and urlContains in page.url:
-            self.log(f"结果成功：当前地址已包含 -> {urlContains}")
-            return True
-
-        if textContains:
-            try:
-                pageText = page.locator("body").inner_text(timeout=timeout)           # 用整页文本判断提示文案、toast、全局成功信息
-            except Exception:
-                pageText = ""
-
-            if textContains in pageText:
-                self.log(f"结果成功：页面文本已包含 -> {textContains}")
+        while time.time() < endTime:
+            if self.isPageReady():
                 return True
-
-        if valueIs is not None and selector:
-            currentValue = self.getValue(selector, timeout=timeout, defaultValue="")   # valueIs 默认针对当前 selector 本身判断
-            if currentValue == valueIs:
-                self.log("结果成功：输入值已经等于目标值。")
-                return True
-
-        if countIs is not None and selector:
-            currentCount = self.count(selector)
-            if currentCount == countIs:
-                self.log(f"结果成功：元素数量已经等于 {countIs}。")
-                return True
-
-        if countAtLeast is not None and selector:
-            currentCount = self.count(selector)
-            if currentCount >= countAtLeast:
-                self.log(f"结果成功：元素数量已经达到 {currentCount}。")
-                return True
-
-        if titleContains:
-            try:
-                title = page.title()                                                  # 页面标题有时也是一种很自然的页面成功标记
-                if titleContains in title:
-                    self.log(f"结果成功：页面标题已包含 -> {titleContains}")
-                    return True
-            except Exception:
-                pass
-
-        self.log("结果检查未通过。")
+            time.sleep(0.2)
         return False
 
-    def makeSure(
-        self,
-        selector: Optional[Any] = None,
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
-        textContains: Optional[str] = None,
-        valueIs: Optional[str] = None,
-        countIs: Optional[int] = None,
-        countAtLeast: Optional[int] = None,
-        titleContains: Optional[str] = None,
-        timeout: Optional[int] = None,
-    ) -> bool:
-        return self.isSmartSuccess(
-            selector=selector,
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains,
-            textContains=textContains,
-            valueIs=valueIs,
-            countIs=countIs,
-            countAtLeast=countAtLeast,
-            titleContains=titleContains,
-            timeout=timeout,
-        )
-
-    def runAction(
-        self,
-        actionName: str,
-        actionFunc,
-        selector: Optional[Any] = None,
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
-        textContains: Optional[str] = None,
-        valueIs: Optional[str] = None,
-        countIs: Optional[int] = None,
-        countAtLeast: Optional[int] = None,
-        titleContains: Optional[str] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-        resultTimeout: Optional[int] = None,
-    ) -> bool:
-        actualRetryCount = self.getRetryCount(retryCount, actionName)                  # 根据动作类型拿默认重试次数
-        actualRetryInterval = self.getRetryInterval(retryInterval)                     # 统一拿重试间隔
-        resultTimeout = self.getTimeout(resultTimeout, self.config.resultTimeout)      # 统一拿结果等待超时
-
-        for index in range(actualRetryCount + 1):                                      # 比如重试 3 次，意味着总共最多尝试 4 次
-            attempt = index + 1                                                        # 把 0 开始的索引转成人类更直觉的次数
-
-            self.log(f"{actionName} 第 {attempt} 次尝试开始。")                         # 每次尝试都打出来，方便回溯问题
-
-            try:
-                actionFunc()                                                           # 真正执行动作，比如 click、fill、press
-            except Exception as error:
-                self.log(f"{actionName} 第 {attempt} 次动作报错：{error}")              # 动作报错不立刻死，让智能流程继续接管
-            else:
-                isSuccess = self.isSmartSuccess(
-                    selector=selector,
-                    showSelector=showSelector,
-                    hideSelector=hideSelector,
-                    urlContains=urlContains,
-                    textContains=textContains,
-                    valueIs=valueIs,
-                    countIs=countIs,
-                    countAtLeast=countAtLeast,
-                    titleContains=titleContains,
-                    timeout=resultTimeout,
-                )
-
-                if isSuccess:
-                    self.log(f"{actionName} 第 {attempt} 次尝试成功。")
-                    return True
-
-            if attempt <= actualRetryCount:                                            # 只要还有机会，就等一下再重试
-                self.log(f"{actionName} 第 {attempt} 次未达到预期，等待 {actualRetryInterval} 秒后重试。")
-                time.sleep(actualRetryInterval)
-
-        self.log(f"{actionName} 已达到最大尝试次数，但仍未成功。")
-        return False
-
-    # ==================== 页面导航类 ====================
+    def openPage(self, url: Optional[str] = None, showSelector: Optional[Any] = None) -> bool:
+        """打开新页面"""
+        if url:
+            return self.goto(url, showSelector=showSelector)
+        self.log(f"当前 page 是否可用：{self.tab is not None}")
+        return self.tab is not None
 
     def goto(
         self,
@@ -816,6 +584,7 @@ class Browser:
         retryInterval: Optional[float] = None,
         **kwargs,
     ) -> bool:
+        """打开URL"""
         if not url:
             self.log("goto 失败：url 为空。")
             return False
@@ -835,7 +604,7 @@ class Browser:
         self.log(f"正在打开页面：{url}")
 
         def action():
-            page.goto(url, timeout=timeout, wait_until=waitUntil, **kwargs)           # 这里两种引擎都兼容 page.goto 语义
+            self._run_async(page.get(url))
             self.waitPageReady(timeout=min(timeout, self.config.waitTimeout))
 
         if not isSmart:
@@ -857,7 +626,6 @@ class Browser:
             titleContains=titleContains,
             retryCount=retryCount,
             retryInterval=retryInterval,
-            resultTimeout=timeout,
         )
 
     def reload(
@@ -872,6 +640,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """刷新页面"""
         page = self.ensurePage()
         timeout = self.getTimeout(timeout, self.config.gotoTimeout)
         isSmart = self.hasSmartRule(
@@ -888,7 +657,7 @@ class Browser:
 
         def action():
             try:
-                page.reload(timeout=timeout, wait_until=waitUntil)
+                self._run_async(page.reload())
             except Exception as error:
                 self.log(f"reload 底层调用报错，但继续检查页面状态：{error}")
             self.waitPageReady(timeout=min(timeout, self.config.waitTimeout))
@@ -912,17 +681,15 @@ class Browser:
             titleContains=titleContains,
             retryCount=retryCount,
             retryInterval=retryInterval,
-            resultTimeout=timeout,
         )
 
     def back(
         self,
         timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """后退"""
         page = self.ensurePage()
         timeout = self.getTimeout(timeout, self.config.gotoTimeout)
         retryCount = self.getRetryCount(retryCount, "back")
@@ -937,65 +704,32 @@ class Browser:
             self.log(f"back 第 {attempt} 次尝试开始，当前地址：{beforeUrl}")
 
             try:
-                page.go_back(timeout=min(timeout, 5000), wait_until="domcontentloaded")
+                self._run_async(page.go_back())
             except Exception as error:
-                self.log(f"原生 go_back 报错，准备继续检查或兜底：{error}")
-
-            isChanged = self.waitUrlChange(beforeUrl, timeout=4000)
-
-            if not isChanged:
-                self.log("原生 go_back 后地址未变化，尝试使用 history.back() 兜底。")
-
-                try:
-                    page.evaluate("history.back()")
-                except Exception as error:
-                    self.log(f"history.back() 执行失败：{error}")
-
-                isChanged = self.waitUrlChange(beforeUrl, timeout=4000)
+                self.log(f"go_back 报错，尝试 history.back() 兜底：{error}")
+                self._run_async(page.evaluate("history.back()"))
 
             self.waitPageReady(timeout=min(timeout, self.config.waitTimeout))
 
             currentUrl = page.url
-            self.log(f"back 第 {attempt} 次尝试后当前地址：{currentUrl}")
-
-            if not isChanged:
-                if attempt <= retryCount:
-                    self.log(f"back 第 {attempt} 次没有产生地址变化，等待 {retryInterval} 秒后重试。")
-                    time.sleep(retryInterval)
-                    continue
-
-                self.log("back 已达到最大尝试次数，但页面地址始终没有变化。")
-                return False
-
-            isTargetOk = self.isSmartSuccess(
-                showSelector=showSelector,
-                urlContains=urlContains,
-                timeout=max(self.config.resultTimeout, 4000),
-            )
-
-            if not showSelector and not urlContains:
-                self.log(f"back 第 {attempt} 次尝试成功：页面地址已经变化。")
+            if currentUrl != beforeUrl:
+                self.log(f"后退成功，当前地址：{currentUrl}")
                 return True
 
-            if isTargetOk:
-                self.log(f"back 第 {attempt} 次尝试成功：页面已经回到目标状态。")
-                return True
-
-            if attempt <= retryCount:
-                self.log(f"back 第 {attempt} 次地址已变化，但目标状态未达成，等待 {retryInterval} 秒后重试。")
+            if index < retryCount:
+                self.log(f"back 第 {attempt} 次未成功，等待 {retryInterval} 秒后重试。")
                 time.sleep(retryInterval)
 
-        self.log("back 已达到最大尝试次数，但仍未到达目标页面。")
+        self.log("back 失败：无法后退。")
         return False
 
     def forward(
         self,
         timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """前进"""
         page = self.ensurePage()
         timeout = self.getTimeout(timeout, self.config.gotoTimeout)
         retryCount = self.getRetryCount(retryCount, "forward")
@@ -1010,88 +744,50 @@ class Browser:
             self.log(f"forward 第 {attempt} 次尝试开始，当前地址：{beforeUrl}")
 
             try:
-                page.go_forward(timeout=min(timeout, 5000), wait_until="domcontentloaded")
+                self._run_async(page.go_forward())
             except Exception as error:
-                self.log(f"原生 go_forward 报错，准备继续检查或兜底：{error}")
-
-            isChanged = self.waitUrlChange(beforeUrl, timeout=4000)
-
-            if not isChanged:
-                self.log("原生 go_forward 后地址未变化，尝试使用 history.forward() 兜底。")
-
-                try:
-                    page.evaluate("history.forward()")
-                except Exception as error:
-                    self.log(f"history.forward() 执行失败：{error}")
-
-                isChanged = self.waitUrlChange(beforeUrl, timeout=4000)
+                self.log(f"go_forward 报错，尝试 history.forward() 兜底：{error}")
+                self._run_async(page.evaluate("history.forward()"))
 
             self.waitPageReady(timeout=min(timeout, self.config.waitTimeout))
 
             currentUrl = page.url
-            self.log(f"forward 第 {attempt} 次尝试后当前地址：{currentUrl}")
-
-            if not isChanged:
-                if attempt <= retryCount:
-                    self.log(f"forward 第 {attempt} 次没有产生地址变化，等待 {retryInterval} 秒后重试。")
-                    time.sleep(retryInterval)
-                    continue
-
-                self.log("forward 已达到最大尝试次数，但页面地址始终没有变化。")
-                return False
-
-            isTargetOk = self.isSmartSuccess(
-                showSelector=showSelector,
-                urlContains=urlContains,
-                timeout=max(self.config.resultTimeout, 4000),
-            )
-
-            if not showSelector and not urlContains:
-                self.log(f"forward 第 {attempt} 次尝试成功：页面地址已经变化。")
+            if currentUrl != beforeUrl:
+                self.log(f"前进成功，当前地址：{currentUrl}")
                 return True
 
-            if isTargetOk:
-                self.log(f"forward 第 {attempt} 次尝试成功：页面已经到达目标状态。")
-                return True
-
-            if attempt <= retryCount:
-                self.log(f"forward 第 {attempt} 次地址已变化，但目标状态未达成，等待 {retryInterval} 秒后重试。")
+            if index < retryCount:
+                self.log(f"forward 第 {attempt} 次未成功，等待 {retryInterval} 秒后重试。")
                 time.sleep(retryInterval)
 
-        self.log("forward 已达到最大尝试次数，但仍未到达目标页面。")
+        self.log("forward 失败：无法前进。")
         return False
 
-    def openPage(self, url: Optional[str] = None, showSelector: Optional[Any] = None) -> bool:
-        if not url:
-            hasPage = self.ensurePage() is not None
-            self.log(f"当前 page 是否可用：{hasPage}")
-            return hasPage
-
-        return self.goto(url, showSelector=showSelector)
-
-    # ==================== 元素动作类 ====================
-
     def tryClick(self, selector: Any, timeout: int, isForce: bool = False):
-        locator = self.getLocator(selector, timeout=timeout)
-        locator.scroll_into_view_if_needed(timeout=timeout)
+        """尝试点击元素"""
+        element = self.getLocator(selector, timeout=timeout)
+        if not element:
+            raise RuntimeError("元素不存在")
+
+        self._run_async(element.scroll_into_view())
 
         if isForce:
-            locator.click(timeout=timeout, force=True)
+            self._run_async(element.click(force=True))
             return
 
         try:
-            locator.click(timeout=timeout)
+            self._run_async(element.click())
             return
         except Exception:
             pass
 
         try:
-            locator.click(timeout=timeout, force=True)
+            self._run_async(element.click(force=True))
             return
         except Exception:
             pass
 
-        locator.evaluate("node => node.click()")
+        self.evaluate(f"document.querySelector('{selector}')?.click()")
 
     def click(
         self,
@@ -1111,6 +807,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """点击元素"""
         if not selector:
             self.log("click 失败：selector 为空。")
             return False
@@ -1134,17 +831,6 @@ class Browser:
             return False
 
         def action():
-            if not isSmart and not isForce:
-                self.getLocator(selector, timeout=timeout).click(
-                    timeout=timeout,
-                    button=button,
-                    click_count=clickCount,
-                    delay=delay,
-                    modifiers=modifiers,
-                    position=position,
-                )
-                return
-
             self.tryClick(selector, timeout=timeout, isForce=isForce)
 
         if not isSmart:
@@ -1181,6 +867,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """填写输入框"""
         if not selector:
             self.log("fill 失败：selector 为空。")
             return False
@@ -1203,11 +890,11 @@ class Browser:
             return False
 
         def action():
-            locator = self.getLocator(selector, timeout=timeout)
-            locator.scroll_into_view_if_needed(timeout=timeout)
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.scroll_into_view())
             if isClear:
-                locator.fill("", timeout=timeout)
-            locator.fill(value, timeout=timeout)
+                self._run_async(element.clear())
+            self._run_async(element.send_keys(value))
 
         if not isSmart:
             try:
@@ -1241,6 +928,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """按键"""
         if not selector:
             self.log("press 失败：selector 为空。")
             return False
@@ -1267,10 +955,44 @@ class Browser:
             return False
 
         def action():
-            locator = self.getLocator(selector, timeout=timeout)
-            locator.scroll_into_view_if_needed(timeout=timeout)
-            locator.focus()
-            locator.press(key, timeout=timeout)
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.scroll_into_view())
+            self._run_async(element.focus())
+
+            key_map = {
+                "Enter": "\r",
+                "Tab": "\t",
+                "Escape": "\x1b",
+                "Backspace": "\x08",
+                "Delete": "\x7f",
+                "ArrowUp": "\x1b[A",
+                "ArrowDown": "\x1b[B",
+                "ArrowLeft": "\x1b[D",
+                "ArrowRight": "\x1b[C",
+                "Home": "\x1b[H",
+                "End": "\x1b[F",
+                "PageUp": "\x1b[5~",
+                "PageDown": "\x1b[6~",
+                "F1": "\x1bOP",
+                "F2": "\x1bOQ",
+                "F3": "\x1bOR",
+                "F4": "\x1bOS",
+                "F5": "\x1b[15~",
+                "F6": "\x1b[17~",
+                "F7": "\x1b[18~",
+                "F8": "\x1b[19~",
+                "F9": "\x1b[20~",
+                "F10": "\x1b[21~",
+                "F11": "\x1b[23~",
+                "F12": "\x1b[24~",
+                "Shift": "\x1b[1;2A",
+                "Control": "\x1b[1;5A",
+                "Alt": "\x1b[1;3A",
+                "Meta": "\x1b[1;9A",
+            }
+
+            nodriver_key = key_map.get(key, key)
+            self._run_async(element.send_keys(nodriver_key))
 
         if not isSmart:
             try:
@@ -1301,6 +1023,7 @@ class Browser:
         showSelector: Optional[Any] = None,
         **kwargs,
     ) -> str:
+        """截图"""
         page = self.ensurePage()
         timeout = self.getTimeout(timeout, self.config.actionTimeout)
 
@@ -1313,7 +1036,7 @@ class Browser:
         self.log(f"正在截图：{path}")
 
         try:
-            page.screenshot(path=path, full_page=fullPage, timeout=timeout, **kwargs)
+            self._run_async(page.screenshot(path=path, full_page=fullPage))
             self.log("截图完成。")
             return path
         except Exception as error:
@@ -1321,6 +1044,7 @@ class Browser:
             return ""
 
     def evaluate(self, script: str, arg: Any = None, defaultValue: Any = None) -> Any:
+        """执行页面脚本"""
         if not script:
             self.log("evaluate 失败：script 为空。")
             return defaultValue
@@ -1330,37 +1054,12 @@ class Browser:
 
         try:
             if arg is None:
-                return page.evaluate(script)
-            return page.evaluate(script, arg)
+                return self._run_async(page.evaluate(script))
+            return self._run_async(page.evaluate(script, arg))
         except Exception as error:
             self.log(f"evaluate 失败：{error}")
             return defaultValue
 
-    def waitUrlChange(self, oldUrl: str, timeout: Optional[int] = None) -> bool:
-        timeout = self.getTimeout(timeout, self.config.waitTimeout)
-        endTime = time.time() + timeout / 1000
-
-        self.log(f"正在等待页面地址变化，旧地址是：{oldUrl}")
-
-        while time.time() < endTime:
-            try:
-                currentUrl = self.ensurePage().url
-                if currentUrl != oldUrl:
-                    self.log(f"页面地址已变化：{oldUrl} -> {currentUrl}")
-                    return True
-            except Exception:
-                pass
-
-            time.sleep(0.2)
-
-        self.log("等待页面地址变化超时。")
-        return False
-
-    def hasUrlChanged(self, oldUrl: str) -> bool:
-        try:
-            return self.ensurePage().url != oldUrl
-        except Exception:
-            return False
     def dblclick(
         self,
         selector: Any,
@@ -1369,6 +1068,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """双击元素"""
         if not selector:
             self.log("dblclick 失败：selector 为空。")
             return False
@@ -1384,9 +1084,9 @@ class Browser:
             return False
 
         def action():
-            locator = self.getLocator(selector, timeout=timeout)
-            locator.scroll_into_view_if_needed(timeout=timeout)
-            locator.dblclick(timeout=timeout)
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.scroll_into_view())
+            self._run_async(element.dblclick())
 
         if not isSmart:
             try:
@@ -1414,6 +1114,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """鼠标悬停"""
         if not selector:
             self.log("hover 失败：selector 为空。")
             return False
@@ -1429,9 +1130,9 @@ class Browser:
             return False
 
         def action():
-            locator = self.getLocator(selector, timeout=timeout)
-            locator.scroll_into_view_if_needed(timeout=timeout)
-            locator.hover(timeout=timeout)
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.scroll_into_view())
+            self._run_async(element.hover())
 
         if not isSmart:
             try:
@@ -1463,6 +1164,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """逐字输入"""
         if not selector:
             self.log("type 失败：selector 为空。")
             return False
@@ -1485,12 +1187,12 @@ class Browser:
             return False
 
         def action():
-            locator = self.getLocator(selector, timeout=timeout)
-            locator.scroll_into_view_if_needed(timeout=timeout)
-            locator.click(timeout=timeout)
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.scroll_into_view())
+            self._run_async(element.click())
             if isClear:
-                locator.fill("", timeout=timeout)
-            locator.type(value, delay=delay, timeout=timeout)
+                self._run_async(element.clear())
+            self._run_async(element.send_keys(value, delay=delay / 1000))
 
         if not isSmart:
             try:
@@ -1519,6 +1221,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """勾选复选框"""
         if not selector:
             self.log("check 失败：selector 为空。")
             return False
@@ -1538,7 +1241,8 @@ class Browser:
             return True
 
         def action():
-            self.getLocator(selector, timeout=timeout).check(timeout=timeout)
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.check())
             if not self.isChecked(selector, timeout=timeout):
                 raise RuntimeError("复选框勾选后状态仍未变为选中。")
 
@@ -1568,6 +1272,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """取消勾选复选框"""
         if not selector:
             self.log("uncheck 失败：selector 为空。")
             return False
@@ -1587,7 +1292,8 @@ class Browser:
             return True
 
         def action():
-            self.getLocator(selector, timeout=timeout).uncheck(timeout=timeout)
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.uncheck())
             if self.isChecked(selector, timeout=timeout):
                 raise RuntimeError("复选框取消勾选后仍然是选中状态。")
 
@@ -1618,6 +1324,7 @@ class Browser:
         retryCount: Optional[int] = None,
         retryInterval: Optional[float] = None,
     ) -> bool:
+        """下拉选择"""
         if not selector:
             self.log("select 失败：selector 为空。")
             return False
@@ -1633,9 +1340,9 @@ class Browser:
             return False
 
         def action():
-            locator = self.getLocator(selector, timeout=timeout)
-            locator.scroll_into_view_if_needed(timeout=timeout)
-            locator.select_option(value=value, timeout=timeout)
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.scroll_into_view())
+            self._run_async(element.select(value))
 
         if not isSmart:
             try:
@@ -1655,65 +1362,8 @@ class Browser:
             retryInterval=retryInterval,
         )
 
-    def setInputFiles(
-        self,
-        selector: Any,
-        filePath: Any,
-        timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        textContains: Optional[str] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        if not selector:
-            self.log("setInputFiles 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        isSmart = self.hasSmartRule(
-            showSelector=showSelector,
-            textContains=textContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-        fileList = filePath if isinstance(filePath, list) else [filePath]
-
-        for onePath in fileList:
-            if not Path(onePath).exists():
-                self.log(f"setInputFiles 失败：文件不存在 -> {onePath}")
-                return False
-
-        self.log(f"正在上传文件到元素：{selector}")
-
-        if not self.has(selector, state="attached", timeout=timeout):
-            self.log(f"setInputFiles 失败：上传控件未出现 -> {selector}")
-            return False
-
-        def action():
-            self.getLocator(selector, timeout=timeout).set_input_files(filePath, timeout=timeout)
-
-        if not isSmart:
-            try:
-                action()
-                self.log("文件上传动作已执行。")
-                return True
-            except Exception as error:
-                self.log(f"setInputFiles 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="setInputFiles",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            textContains=textContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
     def focus(self, selector: Any, timeout: Optional[int] = None) -> bool:
+        """聚焦元素"""
         if not selector:
             self.log("focus 失败：selector 为空。")
             return False
@@ -1726,7 +1376,8 @@ class Browser:
             return False
 
         try:
-            self.getLocator(selector, timeout=timeout).focus()
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.focus())
             self.log(f"已聚焦元素：{selector}")
             return True
         except Exception as error:
@@ -1734,6 +1385,7 @@ class Browser:
             return False
 
     def blur(self, selector: Any, timeout: Optional[int] = None, showSelector: Optional[Any] = None) -> bool:
+        """失焦元素"""
         if not selector:
             self.log("blur 失败：selector 为空。")
             return False
@@ -1746,7 +1398,8 @@ class Browser:
             return False
 
         def action():
-            self.getLocator(selector, timeout=timeout).evaluate("node => node.blur()")
+            element = self.getLocator(selector, timeout=timeout)
+            self._run_async(element.blur())
 
         if not showSelector:
             try:
@@ -1765,27 +1418,29 @@ class Browser:
         )
 
     def scroll(self, selector: Optional[Any] = None, position: Optional[str] = None) -> bool:
+        """滚动页面"""
         page = self.ensurePage()
         self.log("正在执行滚动。")
 
         try:
             if selector:
                 selector = self.normalizeSelector(selector, timeout=600)
-                self.getLocator(selector, timeout=600).scroll_into_view_if_needed(timeout=self.config.actionTimeout)
+                element = self.getLocator(selector, timeout=600)
+                self._run_async(element.scroll_into_view())
                 self.log(f"已滚动到元素位置：{selector}")
                 return True
 
             if position == "top":
-                page.evaluate("window.scrollTo(0, 0)")
+                self._run_async(page.evaluate("window.scrollTo(0, 0)"))
                 self.log("已滚动到页面顶部。")
                 return True
 
             if position == "bottom":
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                self._run_async(page.evaluate("window.scrollTo(0, document.body.scrollHeight)"))
                 self.log("已滚动到页面底部。")
                 return True
 
-            page.mouse.wheel(0, 800)
+            self._run_async(page.mouse.wheel(0, 800))
             self.log("已执行一次普通向下滚动。")
             return True
         except Exception as error:
@@ -1793,6 +1448,7 @@ class Browser:
             return False
 
     def remove(self, selector: Any, timeout: Optional[int] = None) -> bool:
+        """移除元素"""
         if not selector:
             self.log("remove 失败：selector 为空。")
             return False
@@ -1807,345 +1463,114 @@ class Browser:
         self.log(f"正在从页面中移除元素：{selector}")
 
         try:
-            self.ensurePage().locator(selector).evaluate_all("nodes => nodes.forEach(node => node.remove())")
+            self.evaluate(f"""
+                const elements = document.querySelectorAll('{selector}');
+                elements.forEach(el => el.remove());
+            """)
             self.log("元素移除完成。")
             return True
         except Exception as error:
             self.log(f"remove 失败：{error}")
             return False
 
-
-
-if __name__ == "__main__":
-    import os  # 用来判断截图文件和上传测试文件是否存在
-    import tempfile  # 用来临时创建一个上传文件，便于测试 setInputFiles
-    from pathlib import Path  # 处理测试文件路径更清楚
-
-    def printTitle(title: str):
-        print("\n" + "=" * 80)  # 大分隔线，方便控制台阅读
-        print(title)  # 打印阶段标题
-        print("=" * 80)
-
-    def printStep(name: str):
-        print(f"\n--- {name} ---")  # 每个测试项单独一段，更容易定位失败位置
-
-    def assertTrue(value: bool, message: str):
-        if not value:  # 条件不成立时直接抛异常，让当前测试明确失败
-            raise AssertionError(message)
-
-    def assertEqual(left, right, message: str):
-        if left != right:  # 值不相等时抛异常，并带上左右值，方便排查
-            raise AssertionError(f"{message} | left={left!r}, right={right!r}")
-
-    def runTest(testName: str, testFunc, testResults: list):
-        printStep(testName)  # 先打印当前测试名字，控制台更友好
-
-        try:
-            result = testFunc()  # 执行测试函数
-
-            if result is False:  # 显式返回 False 时，也视为失败
-                print(f"[FAIL] {testName}")
-                testResults.append((testName, False))
-                return
-
-            print(f"[PASS] {testName}")  # 没异常且不是 False，就视为成功
-            testResults.append((testName, True))
-        except Exception as error:
-            print(f"[FAIL] {testName} -> {error}")  # 捕获异常但不中断整个测试流程
-            testResults.append((testName, False))
-
-    printTitle("Browser 全面测试开始")  # 整个测试开始时打印大标题
-
-    # ===== 你只需要改这里 =====
-    baseUrl = "http://127.0.0.1:5500/tests"  # 改成你自己部署测试页面的地址，不要带最后的 html 文件名
-    page1Url = f"{baseUrl}/browser_test_page1.html"  # 测试页 1 地址
-    page2Url = f"{baseUrl}/browser_test_page2.html"  # 测试页 2 地址
-
-    print(f"测试页面 1：{page1Url}")  # 打印测试地址，方便肉眼确认
-    print(f"测试页面 2：{page2Url}")
-
-    testResults = []  # 统一收集所有测试结果
-
-    with tempfile.TemporaryDirectory() as tempDirString:  # 临时目录只用于上传测试文件和截图
-        tempDir = Path(tempDirString)
-        uploadFile = tempDir / "upload.txt"  # 准备一个上传测试文件
-        uploadFile.write_text("hello upload", encoding="utf-8")  # 写一点内容，确保文件真实存在
-
-        with Browser(
-            engine="playwright",
-            headless=False,  # 这里你也可以改成 True。调试阶段建议 False，更容易看见页面过程
-            os="windows",
-            geoip=True,
-            humanize=False,
-        ) as browser:
-            # ===== 生命周期与基础能力 =====
-
-            runTest("getPage 可调用", lambda: assertTrue(browser.getPage() is not None, "getPage 返回为空"), testResults)
-
-            runTest("openPage 不带 url", lambda: assertTrue(browser.openPage(), "openPage 不带 url 失败"), testResults)
-
-            runTest("log 可调用", lambda: browser.log("这是 Browser.log 测试。"), testResults)
-
-            runTest("sleep 可调用", lambda: browser.sleep(0.1), testResults)
-
-            # ===== 页面导航类 =====
-
-            runTest("goto 普通调用", lambda: assertTrue(browser.goto(page1Url), "goto 普通调用失败"), testResults)
-
-            runTest(
-                "goto 智能调用 showSelector",
-                lambda: assertTrue(browser.goto(page1Url, showSelector="#app"), "goto 智能调用失败"),
-                testResults,
-            )
-
-            runTest(
-                "openPage 带 url",
-                lambda: assertTrue(browser.openPage(page1Url, showSelector="#app"), "openPage 带 url 失败"),
-                testResults,
-            )
-
-            runTest(
-                "click 跳转到 page2",
-                lambda: assertTrue(browser.click("#toPage2", showSelector="#page2Title", urlContains="browser_test_page2.html"), "跳转到 page2 失败"),
-                testResults,
-            )
-
-            runTest(
-                "恢复到 page1",
-                lambda: assertTrue(browser.goto(page1Url, showSelector="#app"), "恢复到 page1 失败"),
-                testResults,
-            )
-
-            # ===== 读取与判断类 =====
-
-            runTest("has 可见元素", lambda: assertTrue(browser.has("#app"), "has 失败"), testResults)
-
-            runTest("show 可见元素", lambda: assertTrue(browser.show("#app"), "show 失败"), testResults)
-
-            runTest("find 元素", lambda: assertTrue(browser.find("#app") is not None, "find 失败"), testResults)
-
-            runTest("getText", lambda: assertEqual(browser.getText("#app"), "App Ready", "getText 失败"), testResults)
-
-            runTest("getHtml inner", lambda: assertTrue("App Ready" in browser.getHtml("#app"), "getHtml inner 失败"), testResults)
-
-            runTest("getHtml outer", lambda: assertTrue("<h1" in browser.getHtml("#app", isOuter=True), "getHtml outer 失败"), testResults)
-
-            runTest("count 初始数量", lambda: assertEqual(browser.count(".item"), 2, "count 初始数量错误"), testResults)
-
-            runTest("wait 元素可见", lambda: assertTrue(browser.wait("#app"), "wait 失败"), testResults)
-
-            runTest("isDisabled", lambda: assertTrue(browser.isDisabled("#disabledButton"), "isDisabled 失败"), testResults)
-
-            runTest("isChecked 初始未勾选", lambda: assertTrue(browser.isChecked("#agree") is False, "isChecked 初始状态错误"), testResults)
-
-            runTest(
-                "makeSure titleContains",
-                lambda: assertTrue(browser.makeSure(titleContains="Browser Test Page One"), "makeSure titleContains 失败"),
-                testResults,
-            )
-
-            runTest(
-                "动作测试前恢复到 page1",
-                lambda: assertTrue(browser.goto(page1Url, showSelector="#app"), "动作测试前恢复到 page1 失败"),
-                testResults,
-            )
-
-            # ===== 动作类 =====
-
-            runTest(
-                "click 智能重试直到 successPanel 出现",
-                lambda: assertTrue(browser.click("#submit", showSelector="#successPanel", retryCount=2, retryInterval=0.2), "click 智能重试失败"),
-                testResults,
-            )
-
-            runTest(
-                "dblclick",
-                lambda: assertTrue(browser.dblclick("#doubleButton", showSelector="#doubleResult"), "dblclick 失败"),
-                testResults,
-            )
-
-            runTest(
-                "hover",
-                lambda: assertTrue(browser.hover("#menuArea", showSelector="#submenu"), "hover 失败"),
-                testResults,
-            )
-
-            runTest(
-                "fill",
-                lambda: assertTrue(browser.fill("#email", "test@example.com", valueIs="test@example.com"), "fill 失败"),
-                testResults,
-            )
-
-            runTest(
-                "getValue",
-                lambda: assertEqual(browser.getValue("#email"), "test@example.com", "getValue 失败"),
-                testResults,
-            )
-
-            runTest(
-                "type",
-                lambda: assertTrue(browser.type("#typeInput", "hello", valueIs="hello"), "type 失败"),
-                testResults,
-            )
-
-            runTest(
-                "press Enter",
-                lambda: assertTrue(browser.press("#searchInput", "Enter", showSelector="#resultPanel"), "press 失败"),
-                testResults,
-            )
-
-            runTest(
-                "focus",
-                lambda: assertTrue(browser.focus("#blurInput"), "focus 失败"),
-                testResults,
-            )
-
-            runTest(
-                "blur",
-                lambda: assertTrue(browser.blur("#blurInput", showSelector="#blurTip"), "blur 失败"),
-                testResults,
-            )
-
-            runTest(
-                "check",
-                lambda: assertTrue(browser.check("#agree"), "check 失败"),
-                testResults,
-            )
-
-            runTest(
-                "isChecked 勾选后为 True",
-                lambda: assertTrue(browser.isChecked("#agree"), "isChecked 勾选后错误"),
-                testResults,
-            )
-
-            runTest(
-                "uncheck",
-                lambda: assertTrue(browser.uncheck("#agree"), "uncheck 失败"),
-                testResults,
-            )
-
-            runTest(
-                "select",
-                lambda: assertTrue(browser.select("#country", "US", showSelector="#selectResult"), "select 失败"),
-                testResults,
-            )
-
-            runTest(
-                "setInputFiles",
-                lambda: assertTrue(browser.setInputFiles("#fileInput", str(uploadFile), showSelector="#uploadResult"), "setInputFiles 失败"),
-                testResults,
-            )
-
-            runTest(
-                "上传后文件名",
-                lambda: assertEqual(browser.getText("#uploadName"), "upload.txt", "上传文件名错误"),
-                testResults,
-            )
-
-            runTest(
-                "click + hideSelector",
-                lambda: assertTrue(browser.click("#hideLoading", hideSelector="#loading"), "hideSelector 失败"),
-                testResults,
-            )
-
-            runTest(
-                "scroll 到元素",
-                lambda: assertTrue(browser.scroll("#bottomArea"), "scroll 到元素失败"),
-                testResults,
-            )
-
-            runTest(
-                "scroll 到顶部",
-                lambda: assertTrue(browser.scroll(position="top"), "scroll top 失败"),
-                testResults,
-            )
-
-            runTest(
-                "scroll 到底部",
-                lambda: assertTrue(browser.scroll(position="bottom"), "scroll bottom 失败"),
-                testResults,
-            )
-
-            runTest(
-                "click 添加 item",
-                lambda: assertTrue(browser.click("#addItems"), "addItems 点击失败"),
-                testResults,
-            )
-
-            runTest(
-                "wait countAtLeast",
-                lambda: assertTrue(browser.wait(".item", countAtLeast=4, timeout=3000), "wait countAtLeast 失败"),
-                testResults,
-            )
-
-            runTest(
-                "count 增加后数量",
-                lambda: assertEqual(browser.count(".item"), 4, "count 增加后错误"),
-                testResults,
-            )
-
-            runTest(
-                "makeSure countAtLeast",
-                lambda: assertTrue(browser.makeSure(selector=".item", countAtLeast=4), "makeSure countAtLeast 失败"),
-                testResults,
-            )
-
-            runTest(
-                "showHiddenButton 后 hiddenTarget 出现",
-                lambda: assertTrue(browser.click("#showHiddenButton", showSelector="#hiddenTarget"), "hiddenTarget 未出现"),
-                testResults,
-            )
-
-            runTest(
-                "高级测试前恢复到 page1",
-                lambda: assertTrue(browser.goto(page1Url, showSelector="#app"), "高级测试前恢复到 page1 失败"),
-                testResults,
-            )
-
-            # ===== 高级与调试类 =====
-
-            runTest(
-                "evaluate",
-                lambda: assertEqual(browser.evaluate("() => document.title"), "Browser Test Page One", "evaluate 失败"),
-                testResults,
-            )
-
-            runTest(
-                "remove",
-                lambda: assertTrue(browser.remove("#removeMe"), "remove 失败"),
-                testResults,
-            )
-
-            runTest(
-                "remove 后元素不存在",
-                lambda: assertTrue(browser.has("#removeMe", state="attached", timeout=300) is False, "remove 后元素仍存在"),
-                testResults,
-            )
-
-            runTest(
-                "screenshot",
-                lambda: assertTrue(os.path.exists(browser.screenshot(path=str(tempDir / "quick-test-shot.png"), showSelector="#app")), "screenshot 文件不存在"),
-                testResults,
-            )
-
-        # Browser.close() 不单独作为测试项了。  # 因为 with 结束时已经自动调用 close，更符合真实使用场景
-
-    printTitle("测试结果汇总")  # 所有测试结束后统一汇总
-
-    passCount = sum(1 for _, passed in testResults if passed)  # 统计通过数量
-    failCount = sum(1 for _, passed in testResults if not passed)  # 统计失败数量
-
-    for name, passed in testResults:
-        mark = "PASS" if passed else "FAIL"  # 统一格式展示每个测试项状态
-        print(f"[{mark}] {name}")
-
-    print("\n" + "-" * 80)
-    print(f"总数：{len(testResults)}")
-    print(f"通过：{passCount}")
-    print(f"失败：{failCount}")
-    print("-" * 80)
-
-    if failCount == 0:
-        print("全部测试通过。")
-    else:
-        print("有测试失败，请根据上面的 FAIL 项检查 Browser 实现或测试页面内容。")
+    def runAction(
+        self,
+        actionName: str,
+        actionFunc: Callable,
+        selector: Any = None,
+        showSelector: Any = None,
+        hideSelector: Any = None,
+        urlContains: str = None,
+        textContains: str = None,
+        titleContains: str = None,
+        valueIs: str = None,
+        retryCount: Optional[int] = None,
+        retryInterval: Optional[float] = None,
+    ) -> bool:
+        """执行带重试和验证的动作"""
+        retryCount = self.getRetryCount(retryCount, actionName)
+        retryInterval = self.getRetryInterval(retryInterval)
+
+        for index in range(retryCount + 1):
+            attempt = index + 1
+            self.log(f"{actionName} 第 {attempt} 次尝试开始。")
+
+            try:
+                actionFunc()
+            except Exception as error:
+                self.log(f"{actionName} 第 {attempt} 次动作报错：{error}")
+                if index < retryCount:
+                    self.log(f"{actionName} 第 {attempt} 次未达到预期，等待 {retryInterval} 秒后重试。")
+                    time.sleep(retryInterval)
+                    continue
+                else:
+                    self.log(f"{actionName} 已达到最大尝试次数，但仍未成功。")
+                    return False
+
+            if self._checkActionResult(
+                showSelector=showSelector,
+                hideSelector=hideSelector,
+                urlContains=urlContains,
+                textContains=textContains,
+                titleContains=titleContains,
+                valueIs=valueIs,
+                selector=selector,
+            ):
+                self.log(f"{actionName} 完成。")
+                return True
+
+            if index < retryCount:
+                self.log(f"{actionName} 第 {attempt} 次未达到预期，等待 {retryInterval} 秒后重试。")
+                time.sleep(retryInterval)
+
+        self.log(f"{actionName} 已达到最大尝试次数，但仍未成功。")
+        return False
+
+    def _checkActionResult(
+        self,
+        showSelector: Any = None,
+        hideSelector: Any = None,
+        urlContains: str = None,
+        textContains: str = None,
+        titleContains: str = None,
+        valueIs: str = None,
+        selector: Any = None,
+    ) -> bool:
+        """检查动作执行结果"""
+        checkItems = []
+
+        if showSelector:
+            checkItems.append(lambda: self.has(showSelector, state="visible", timeout=1000))
+        if hideSelector:
+            checkItems.append(lambda: not self.has(hideSelector, state="attached", timeout=1000))
+        if urlContains:
+            checkItems.append(lambda: urlContains in self.getUrl())
+        if textContains:
+            checkItems.append(lambda: textContains in self.getText("body", timeout=1000))
+        if titleContains:
+            checkItems.append(lambda: titleContains in self.getTitle())
+        if valueIs and selector:
+            checkItems.append(lambda: self.getValue(selector, timeout=1000) == valueIs)
+
+        if not checkItems:
+            return True
+
+        for check in checkItems:
+            try:
+                if not check():
+                    return False
+            except Exception:
+                return False
+
+        return True
+
+    def waitUrlChange(self, oldUrl: str, timeout: Optional[int] = None) -> bool:
+        """等待URL变化"""
+        timeout = self.getTimeout(timeout, self.config.waitTimeout)
+        endTime = time.time() + timeout / 1000
+
+        while time.time() < endTime:
+            if self.getUrl() != oldUrl:
+                return True
+            time.sleep(0.2)
+        return False
