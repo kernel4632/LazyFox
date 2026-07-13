@@ -4,7 +4,11 @@ import time
 import json
 
 """
-Mail.gw 临时邮箱模块
+Mail.gw / Mail.tm 临时邮箱模块
+
+默认使用 Mail.tm（api.mail.tm），因为 Mail.gw 经常 502。
+两者 API 完全兼容，区别仅在 Base URL，构造时可传 apiUrl 切换。
+如果传入的 apiUrl 不可用，会自动降级到备用地址（mail.tm ↔ mail.gw 互切）。
 
 使用方法：
     # 拿验证码
@@ -27,19 +31,26 @@ Mail.gw 临时邮箱模块
             print(mail.findCode(body))
             print(mail.findLink(body))
 
-Mail.gw API 特性：
+    # 指定用 mail.gw（如果它恢复了）
+    with TempMail(apiUrl="https://api.mail.gw") as mail:
+        print(mail.generateEmail())
+
+API 特性：
     - 完全免费，无需 API Key
     - 每个 IP 限制 8 QPS
     - 账号创建和 /domains 接口无需认证，其他接口均需 Bearer Token
     - 支持 SSE（Mercure）实时推送新邮件事件
-    - 与 Mail.tm API 兼容，区别仅在 Base URL
+    - Mail.gw 与 Mail.tm API 完全兼容，区别仅在 Base URL
 """
+
+# mail.gw 和 mail.tm 互为备用，哪个挂了自动切另一个
+API_URLS = ["https://api.mail.tm", "https://api.mail.gw"]
 
 
 class TempMail:
-    """临时邮箱模块（适配 Mail.gw）"""
+    """临时邮箱模块（适配 Mail.gw / Mail.tm，默认 Mail.tm）"""
 
-    def __init__(self, apiUrl="https://api.mail.gw", password="lazFox123"):
+    def __init__(self, apiUrl="https://api.mail.tm", password="lazFox123"):
         self.apiUrl = apiUrl
         self.password = password
         self.token = ""
@@ -74,8 +85,30 @@ class TempMail:
         response.raise_for_status()
         return response
 
+    def tryFallbackUrl(self):
+        """尝试切换到备用 API 地址（mail.gw ↔ mail.tm 互切）"""
+        for url in API_URLS:
+            if url == self.apiUrl:
+                continue  # 跳过当前已失败的地址
+            try:
+                # 用 /domains 接口做健康检查，能通就切过去
+                r = self.client.get(url + "/domains", timeout=10)
+                if 200 <= r.status_code < 300:
+                    print(f"[TempMail] 主 API {self.apiUrl} 不可用，已切换到备用 {url}")
+                    self.apiUrl = url
+                    return True
+            except Exception:
+                continue
+        return False
+
     def fetchDomains(self):
-        response = self.sendRequest("GET", "/domains")
+        try:
+            response = self.sendRequest("GET", "/domains")
+        except Exception:
+            # 主 API 挂了，尝试切到备用地址再请求一次
+            if not self.tryFallbackUrl():
+                raise RuntimeError(f"所有 API 地址均不可用: {API_URLS}")
+            response = self.sendRequest("GET", "/domains")
         data = response.json()
         members = data.get("hydra:member", [])
         self.domains = [d.get("domain", "") for d in members if d.get("domain")]
@@ -154,7 +187,7 @@ class TempMail:
     def streamOneEvent(self, timeoutSeconds=60):
         if not self.token or not self.accountID:
             return None
-        mercureUrl = "https://api.mail.gw/.well-known/mercure"
+        mercureUrl = f"{self.apiUrl}/.well-known/mercure"  # 基于当前 API 地址动态拼接
         topic = f"/accounts/{self.accountID}"
         params = {"topic": topic, "Authorization": f"Bearer {self.token}"}
         startTime = time.time()
@@ -169,7 +202,9 @@ class TempMail:
                 "Cache-Control": "no-cache",
                 "Authorization": f"Bearer {self.token}",
             },
-            timeout=httpx.Timeout(connect=10, read=timeoutSeconds + 5, write=10, pool=10),
+            timeout=httpx.Timeout(
+                connect=10, read=timeoutSeconds + 5, write=10, pool=10
+            ),
         ) as response:
             response.raise_for_status()
             for rawLine in response.iter_lines():
