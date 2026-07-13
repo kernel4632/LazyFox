@@ -51,7 +51,7 @@ async def register():
 
         browser = await uc.start(headless=False)
         tab = await browser.get("https://accounts.x.ai/sign-up")
-        await tab.sleep(3)
+        await tab.sleep(10)
 
         # 填写邮箱
         await (await tab.find("/html/body/div[2]/div/div[1]/div[2]/div/div[2]/button[1]")).click()
@@ -63,7 +63,7 @@ async def register():
             error = await tab.find("/html/body/div[2]/div/div[1]/div[2]/div/form/div[1]/p", timeout=5)
             if error and "已被拒绝" in await error.text:
                 console.print("[red]邮箱域名被拒绝[/red]")
-                await browser.stop()
+                browser.stop()
                 return False
         except:
             pass
@@ -72,7 +72,7 @@ async def register():
         code = await extractCode(mail)
         if not code:
             console.print("[red]未获取到验证码[/red]")
-            await browser.stop()
+            browser.stop()
             return False
 
         # 输入验证码
@@ -121,11 +121,11 @@ async def register():
         if sso:
             saveToken(sso)
             console.print(f"[green]✓ 注册成功[/green] token: {sso[:20]}...")
-            await browser.stop()
+            browser.stop()
             return True
         else:
             console.print("[red]未找到 sso token[/red]")
-            await browser.stop()
+            browser.stop()
             return False
 
 
