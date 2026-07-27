@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🦊 LazyFox
+# LazyFox
 
 ### 懒惰不是罪，自动化才是美。
 
@@ -55,6 +55,39 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+## 跑通 Grok 注册示例
+
+`register/grok.py` 是完整可运行的 x.ai 邮箱注册示例。它使用随机临时邮箱渠道，自动完成
+邮箱提交、验证码读取、资料填写和结果保存；Cloudflare Turnstile 必须由用户在有头 Chrome
+中手动完成。
+
+```bash
+uv run python register/grok.py \
+  --count 1 \
+  --no-headless \
+  --mail-channel random \
+  --email-attempts 3 \
+  --flow-timeout 300 \
+  --output token/grok-tokens.txt
+```
+
+运行过程：
+
+1. 脚本从随机渠道申请临时邮箱，并等待 xAI 验证码。
+2. 邮箱域名被拒绝、邮箱已关联现有账户或收不到验证码时，脚本会关闭当前 Chrome，换邮箱后完整重试。
+3. 到达 Turnstile 时，Chrome 会恢复到前台并播放提示音。手动点击“请验证您是真人”即可继续。
+4. 注册成功后，脚本留在 xAI 账户页面读取 `sso` Cookie，并原子去重写入 `--output` 文件。
+
+正式注册不支持 `--headless`。无头 Chrome 无法可靠访问 xAI，也无法完成人机验证；传入该参数时
+脚本会在创建邮箱和浏览器前退出。只检查站点是否可访问时可以使用：
+
+```bash
+uv run python register/grok.py --check --headless --flow-timeout 45
+```
+
+每个账号运行在独立子进程中。超过 `--flow-timeout` 后，父进程会终止脚本及其 Chrome 进程树，
+避免网络请求或浏览器永久挂住。失败截图保存在 `output/grok/`。
+
 ## 写注册机
 
 ```python
@@ -62,7 +95,7 @@ from lazyfox import Browser, Lines, Mail, Person
 
 who = Person(lang="en").all()                         # 一次生成注册资料
 
-with Mail(channel="mailinator") as mail:
+with Mail() as mail:                                   # 不指定渠道时随机选择
     address = mail.create()                            # 申请真实可收信的临时邮箱
 
     with Browser(headless=False) as page:
@@ -96,6 +129,9 @@ page.click("#submit", appear="#done", skip_if_done=True)  # 恢复中断流程�
 `click` 默认只真正点击一次，之后只轮询成功条件，避免重复注册、重复发码和重复扣费。
 只有明确需要连点时才传 `repeat=True`。
 
+在 Windows 有头模式下，LazyFox 会关闭 Chrome 的后台计时和窗口遮挡冻结。浏览器可在自动步骤中
+保持后台运行；需要真人操作时，可调用 `page.front()` 恢复窗口并播放提示音。
+
 选择器支持显式前缀，也支持自动识别：
 
 ```python
@@ -114,9 +150,9 @@ from lazyfox import Mail
 
 channels = Mail.channels("mailinator")                 # 搜索 SDK 支持渠道
 
-with Mail(channel="mailinator", proxy="http://127.0.0.1:7890", timeout=20) as mail:
+with Mail(proxy="http://127.0.0.1:7890", timeout=20) as mail:  # channel=None 表示随机渠道
     address = mail.create(
-        domain=None,                                    # 可指定渠道支持的域名
+        domains=["example.com", "example.net"],       # 按优先级指定渠道支持的候选域名
         duration=30,                                    # 有效分钟数
         max_channels=20,                                # 随机模式最多尝试渠道数
         total_timeout=60,
@@ -125,6 +161,10 @@ with Mail(channel="mailinator", proxy="http://127.0.0.1:7890", timeout=20) as ma
     code = mail.wait_code(subject="verify", sender="no-reply", timeout=120)
     link = mail.wait_link(keyword="confirm", sender="no-reply")
 ```
+
+`domain` / `domains` 指 `@` 后面的邮箱域名，只能使用具体渠道实际支持的值；`suffix` 指邮箱
+用户名后缀，不是邮箱域名。固定渠道可传 `Mail(channel="渠道标识")`，可用标识通过
+`Mail.channels()` 查询。
 
 SDK 默认匿名遥测已关闭。不同 `Mail` 实例使用不同代理时，配置和请求会加锁隔离。
 
@@ -181,11 +221,12 @@ GET/HEAD/OPTIONS 默认可重试；POST、PUT 等可能产生副作用的请求�
 
 ```bash
 uv run pytest tests/
-uv run ruff check tools/ lazyfox/ tests/
+uv run ruff check tools/ lazyfox/ register/grok.py tests/
 ```
 
 浏览器测试会真实启动无头 Chrome，覆盖元素定位、填写回读、逐字输入、复选框、下拉框和
-点击结果判断。没有可用浏览器时仅跳过该项。
+点击结果判断。没有可用浏览器时仅跳过该项。Grok 测试使用假浏览器和假邮箱离线覆盖完整流程，
+不会创建真实账号；真实注册仍需显式运行上面的有头命令。
 
 ## 许可
 

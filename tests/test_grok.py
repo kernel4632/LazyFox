@@ -142,6 +142,7 @@ def test_make_email_rejects_blacklist():
 def test_cli_is_non_interactive():
     args = parse_args(["--count", "2", "--headless", "--flow-timeout", "45", "--check"])
     settings = settings_from(args)                         # 参数直接转换，无 input() 阻塞
+    assert settings.mail_channel == "random"               # 默认使用已真实验证的随机渠道
     assert settings.count == 2
     assert settings.headless is True
     assert settings.flow_timeout == 45

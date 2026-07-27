@@ -99,7 +99,7 @@ class Settings:
     count: int = 1                                         # 批量账号数量
     headless: bool = False                                 # 是否隐藏浏览器窗口
     proxy: str | None = None                               # 浏览器和临时邮箱共用代理
-    mail_channel: str | None = "m2u"                       # 默认沿用原示例的 m2u 渠道，传 random 可随机
+    mail_channel: str | None = "random"                    # 默认随机渠道，指定标识时固定使用某个服务商
     mail_timeout: int = 120                                # 等验证码最长秒数
     email_attempts: int = 3                                # 域名被拒绝时最多换邮箱重开流程次数
     page_timeout: int = 30                                 # 每个页面阶段最长秒数
@@ -399,7 +399,7 @@ def parse_args(argv=None):
     parser.add_argument("--count", type=positive, default=1, help="注册数量，默认 1")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False, help="是否无界面运行 Chrome")
     parser.add_argument("--proxy", default=None, help="浏览器和邮箱代理，如 http://127.0.0.1:7890")
-    parser.add_argument("--mail-channel", default="m2u", help="临时邮箱渠道；random 表示随机")
+    parser.add_argument("--mail-channel", default="random", help="临时邮箱渠道，默认 random 随机选择")
     parser.add_argument("--mail-timeout", type=positive, default=120, help="等待验证码秒数")
     parser.add_argument("--email-attempts", type=positive, default=3, help="邮箱域名拒绝后的总尝试次数")
     parser.add_argument("--page-timeout", type=positive, default=30, help="页面阶段等待秒数")
