@@ -8,14 +8,12 @@ license = { text = "AGPL-3.0" }
 authors = [
     { name = "Kernyr", email = "917811726@qq.com" }
 ]
-keywords = ["automation", "reverse-engineering", "playwright", "camoufox"]
+keywords = ["automation", "reverse-engineering", "nodriver", "tempmail"]
 
 dependencies = [
-    "camoufox[geoip]>=0.2.0",
     "httpx>=0.25.0",
     "curl-cffi>=0.5.0",
     "websocket-client>=1.9.0",
-    "playwright>=1.58.0",
     "requests>=2.33.1",
     "python-dotenv>=1.2.2",
     "flask>=3.1.3",
@@ -24,9 +22,45 @@ dependencies = [
     "fastapi>=0.136.0",
     "nodriver>=0.48.1",
     "beautifulsoup4>=4.14.3",
+    "tempemail-sdk>=1.3.4",
+    "faker>=40.36.0",
 ]
+
+# 让 uv/pip 把 lazyfox 和 tools 安装进虚拟环境。这样直接运行 register/demo.py 时，
+# 也能 from lazyfox import ...，不再需要手写 sys.path.insert。
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["lazyfox*", "tools*"]
 
 [project.urls]
 Homepage = "https://github.com/kernel4632/LazyFox"
 Repository = "https://github.com/kernel4632/LazyFox"
 Issues = "https://github.com/kernel4632/LazyFox/issues"
+
+# 开发期才需要的工具：代码风格检查(ruff) 和 测试框架(pytest)
+# 单独列在 dependency-groups，正式使用脚手架时无需安装，保持运行环境干净
+[dependency-groups]
+dev = [
+    "ruff>=0.6.0",
+    "pytest>=8.0.0",
+]
+
+# ruff 代码风格配置：行宽放宽到 120，因为本项目注释按 HOP 规范右对齐，行会偏长
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+# 只保留能真正抓 bug 的规则；关掉和 HOP 注释风格冲突的规则：
+# I001 会想把带尾随注释的 import 重排；BLE001/S110 针对"兜底静默捕获"，而本项目
+# 大量收尾逻辑刻意用 try/except pass 保证不中断主流程，属于有意为之
+[tool.ruff.lint]
+select = ["E", "F", "W", "UP"]
+ignore = ["E501", "E741"]
+
+# pytest 配置：测试都放在 tests 目录，文件名以 test_ 开头
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

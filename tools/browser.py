@@ -1,1576 +1,654 @@
 """
-Browser 类 - 基于 nodriver 的智能浏览器自动化工具
+浏览器自动化工具：一个 Browser 对象，把"打开页面、点按钮、填表单"这些动作
+包装得既简单又聪明，专门服务于逆向注册这类"点了不一定成功、要反复确认"的场景。
 
-这是一个统一的浏览器自动化入口，封装了 nodriver 浏览器引擎，
-提供更智能、更适合业务直接调用的 API，同时具备更强的反检测能力。
+设计思想：
+底层用 nodriver（直接驱动 Chrome，无需 WebDriver，反检测能力强）。但 nodriver 是
+异步 API，且一个动作到底"成功没有"要自己判断。本文件解决两件事：
 
-【核心优势】
-- 基于 nodriver，无需额外 WebDriver，直接与 Chrome/Chromium 通信
-- 内置强大的伪装能力，自动处理指纹、UA、语言等检测点
-- 简化的 API 设计，易于使用和理解
+1. 同步化——内部维护一个事件循环，把所有异步调用藏起来，调用方写同步代码即可，
+   不用到处 await，不用管事件循环。
 
-【基本用法】
-python
-from browser import Browser
+2. 智能判断——这是核心。真实网页里，"点击"经常点了没反应（元素还没加载、被遮挡、
+   动画未结束）。所以每个动作都支持"期望结果"参数：点完之后期望某元素出现 / 某文字
+   出现 / 网址变化，动作会自己重试直到期望达成或超时。达成才算成功返回 True，
+   否则返回 False。调用方一个 if 就知道这步成没成，不用自己写等待和轮询。
 
-# 方式1：使用 with 语句（推荐）
-with Browser(headless=False) as browser:
-    browser.goto("https://example.com")
-    browser.click("#button")
-    # 使用完毕自动关闭
+统一判断参数（点击/填写/打开等动作都支持）：
+- appear   ：期望某个元素出现，才算成功
+- vanish   ：期望某个元素消失，才算成功
+- url_has  ：期望网址包含某段文字，才算成功
+- text_has ：期望页面出现某段文字，才算成功
+- tries    ：最多重试几次
+- gap      ：每次重试之间隔几秒
 
-# 方式2：手动管理
-browser = Browser()
-try:
-    browser.goto("https://example.com")
-    browser.fill("#input", "text")
-finally:
-    browser.close()
+选择器规则：
+- 以 "css=" 开头   → 强制按 CSS 选择器查找，如 "css=button.submit"
+- 以 "xpath=" 开头 → 强制按 XPath 查找，如 "xpath=//button[@type='submit']"
+- 以 "text=" 开头  → 强制按页面可见文字查找，如 "text=注册"
+- 无前缀时自动判断：以 / 或 ( 开头视为 XPath，含 CSS 特征字符视为 CSS，其余视为文字
 
+里面有什么：
+- Browser 类            浏览器实例，管生命周期和所有页面动作
+- Browser.open()        打开网址
+- Browser.click()       点击元素（支持智能判断）
+- Browser.fill()        填写输入框（清空后整串写入）
+- Browser.type()        逐字缓慢输入（触发 JS 逐字校验的站点必须用这个）
+- Browser.fill_form()   一次填多个字段（传入字典 {选择器: 值}）
+- Browser.upload()      上传文件
+- Browser.wait()        等待元素/文字/网址满足条件
+- Browser.exists()      判断元素是否存在
+- Browser.value()       读取输入框当前值（回读校验用）
+- Browser.text()        取元素或整页文字
+- Browser.html()        取元素或整页 HTML 源码
+- Browser.cookie()      取某个 cookie 值（逆向拿 token 常用）
+- Browser.cookies()     取全部 cookie 为字典
+- Browser.switch()      切换到新标签页（OAuth 弹窗场景）
+- Browser.tabs()        列出所有标签页的网址
+- Browser.shot()        截图
+- Browser.run_js()      执行 JS 并取返回值
 
-【配置选项】
-BrowserConfig 类提供了以下可配置项：
-- clickRetryCount: 点击动作默认重试次数（默认3）
-- actionRetryCount: 非点击动作默认重试次数（默认2）
-- retryInterval: 重试间隔秒数（默认1.0）
-- actionTimeout: 普通动作超时毫秒（默认8000）
-- resultTimeout: 动作后等待结果超时毫秒（默认2500）
-- gotoTimeout: 打开页面超时毫秒（默认30000）
-- waitTimeout: wait方法默认超时毫秒（默认10000）
-- typeDelay: 逐字输入间隔毫秒（默认80）
-- isDebug: 是否打印调试日志（默认True）
-- headless: 是否无头运行（默认False）
-- viewportWidth: 视口宽度（默认1440）
-- viewportHeight: 视口高度（默认900）
-- userAgent: 自定义UA字符串（默认空，自动生成真实UA）
+怎么调用：
+    from tools.browser import Browser
 
-【主要方法】
-1. 生命周期管理
-   - start(): 启动浏览器
-   - close(): 关闭浏览器
-   - getPage(): 获取当前页面对象
-
-2. 页面导航
-   - goto(url, **kwargs): 打开URL
-   - reload(**kwargs): 刷新页面
-   - back(**kwargs): 后退
-   - forward(**kwargs): 前进
-
-3. 元素操作
-   - click(selector, **kwargs): 点击元素
-   - fill(selector, value, **kwargs): 填写输入框
-   - type(selector, value, **kwargs): 逐字输入
-   - press(selector, key, **kwargs): 按键
-   - check(selector, **kwargs): 勾选复选框
-   - uncheck(selector, **kwargs): 取消勾选
-   - select(selector, value, **kwargs): 下拉选择
-   - hover(selector, **kwargs): 鼠标悬停
-   - dblclick(selector, **kwargs): 双击
-   - focus(selector, **kwargs): 聚焦元素
-   - blur(selector, **kwargs): 失焦
-   - scroll(selector=None, position=None): 滚动页面
-   - remove(selector, **kwargs): 移除元素
-
-4. 元素查询
-   - has(selector, **kwargs): 判断元素是否存在
-   - show(selector, **kwargs): 判断元素是否可见
-   - wait(selector, **kwargs): 等待元素满足条件
-   - find(selector, **kwargs): 查找元素
-   - count(selector): 统计元素数量
-   - getText(selector, **kwargs): 获取文本
-   - getValue(selector, **kwargs): 获取输入框值
-   - getHtml(selector, **kwargs): 获取HTML
-   - isChecked(selector, **kwargs): 判断是否勾选
-   - isDisabled(selector, **kwargs): 判断是否禁用
-
-5. 智能操作（支持自动重试和结果验证）
-   所有操作方法都支持以下智能参数：
-   - showSelector: 等待指定元素出现
-   - hideSelector: 等待指定元素消失
-   - urlContains: 等待URL包含指定文本
-   - textContains: 等待页面包含指定文本
-   - valueIs: 等待输入框值等于指定值
-   - countIs: 等待元素数量等于指定值
-   - countAtLeast: 等待元素数量至少达到指定值
-   - titleContains: 等待页面标题包含指定文本
-   - retryCount: 自定义重试次数
-   - retryInterval: 自定义重试间隔
-
-6. 工具方法
-   - screenshot(path=None, **kwargs): 截图
-   - evaluate(script, arg=None): 执行JS脚本
-   - getTitle(): 获取页面标题
-   - getUrl(): 获取当前URL
-   - sleep(seconds): 等待指定秒数
-   - log(message): 打印日志
-
-【反检测特性】
-- 自动隐藏 navigator.webdriver 属性
-- 自动设置真实的语言和时区
-- 模拟真实的硬件信息（内存、CPU核心数）
-- 动态生成逼真的用户代理字符串
-- 设置正确的平台信息
-
-【开发者提示】
-- 所有方法都有完善的日志输出，开启 isDebug=True 可查看详细执行过程
-- 智能重试机制会自动处理网络波动和元素加载延迟
-- 建议使用 with 语句管理浏览器生命周期，确保资源正确释放
-- 复杂操作建议使用智能参数进行结果验证，提高稳定性
+    with Browser(headless=False) as page:
+        page.open("https://example.com/sign_up")
+        page.fill("#email", "a@b.com")
+        # 点注册，并要求点完后网址离开注册页才算成功
+        ok = page.click("#submit", url_has="/welcome")
+        if ok:
+            token = page.cookie("sso")             # 注册成功，取出登录 token
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Optional, List, Dict, Tuple, Callable, Union
-import time
-import random
-import asyncio
-
-from nodriver import Tab, start, Element
+import asyncio                                              # 标准异步库，用来自建并驱动事件循环
+import json                                                 # 安全编码下拉框值，避免拼接 JS 时引号冲突
+import sys                                                  # Windows 真人操作阶段需要恢复浏览器窗口
+import time                                                 # 用于重试之间的等待和超时计时
+import nodriver                                             # 底层浏览器引擎，直接和 Chrome 通信
 
 
-@dataclass
-class BrowserConfig:
-    """浏览器配置类"""
-
-    clickRetryCount: int = 3  # 点击动作默认重试次数
-    actionRetryCount: int = 2  # 非点击动作默认重试次数
-    retryInterval: float = 1.0  # 重试间隔秒数
-    actionTimeout: int = 8000  # 普通动作超时毫秒
-    resultTimeout: int = 2500  # 动作后等待结果超时毫秒
-    gotoTimeout: int = 30000  # 打开页面超时毫秒
-    waitTimeout: int = 10000  # wait方法默认超时毫秒
-    typeDelay: int = 80  # 逐字输入间隔毫秒
-    isDebug: bool = True  # 是否打印调试日志
-    headless: bool = False  # 是否无头运行
-    viewportWidth: int = 1440  # 默认视口宽度
-    viewportHeight: int = 900  # 默认视口高度
-    userAgent: str = ""  # 自定义UA，空则自动生成
+# 一批让浏览器更"干净"的启动参数：关掉密码保存气泡、通知、后台节流等
+# 逆向注册时这些弹窗会挡住按钮、拖慢流程，模块级常量集中管理便于统一调整
+clean_args = [
+    "--disable-save-password-bubble",                       # 关掉"是否保存密码"气泡，它会盖住注册按钮
+    "--disable-notifications",                              # 关掉网站通知请求弹窗
+    "--disable-infobars",                                   # 关掉顶部"Chrome 正被自动化控制"提示条
+    "--no-default-browser-check",                           # 跳过默认浏览器检查弹窗
+    "--disable-background-timer-throttling",                # 禁止后台标签页降速，保证脚本稳定执行
+    "--disable-renderer-backgrounding",                     # 同上，防止窗口失焦后渲染被暂停
+    "--disable-backgrounding-occluded-windows",             # Windows 窗口被遮挡时仍保持渲染和事件处理
+    "--disable-features=CalculateNativeWinOcclusion",       # 禁止 Chrome 按原生窗口遮挡状态冻结页面
+]
 
 
 class Browser:
-    def __init__(
-        self,
-        page=None,
-        config: Optional[BrowserConfig] = None,
-        autoStart: bool = True,
-        **browserArgs,
-    ):
-        print("正在初始化 Browser。")
+    """一个浏览器实例，同步接口 + 内置智能判断。"""
 
-        self.config = config or BrowserConfig()
-        self.browserArgs = browserArgs
+    # --- 初始化：记录配置并启动浏览器 ---
+    def __init__(self, headless=False, proxy=None, window=(1280, 800), args=None, auto_start=True):
+        # headless：是否无界面运行，调试时设 False 能看到浏览器
+        # proxy：代理地址，需要换 IP 时传入
+        # window：初始窗口尺寸，(宽, 高)
+        # args：额外的 Chrome 启动参数，会和内置 clean_args 合并
+        # auto_start：是否在创建时就启动浏览器，默认是
+        self.headless = headless                            # 保存无头开关，start 时用
+        self.proxy = proxy                                  # 保存代理设置
+        self.window = window                                # 保存窗口尺寸
+        self.extra_args = args or []                        # 保存额外启动参数，None 归一成空列表
+        self.loop = None                                    # 事件循环，start 时创建，驱动所有异步调用
+        self.driver = None                                  # nodriver 的浏览器对象
+        self.tab = None                                     # 当前操作的标签页，所有动作都作用在它上面
 
-        self.headless = self.browserArgs.pop("headless", self.config.headless)
-        self.viewportWidth = self.browserArgs.pop("viewportWidth", self.config.viewportWidth)
-        self.viewportHeight = self.browserArgs.pop("viewportHeight", self.config.viewportHeight)
-        self.userAgent = self.browserArgs.pop("userAgent", self.config.userAgent)
-
-        self.tab = page
-        self.isStarted = page is not None
-        self.browser = None
-        self._loop = None
-
-        if autoStart and self.tab is None:
+        if auto_start:                                      # 默认创建即启动，让调用方少写一步
             self.start()
 
-        print("Browser 初始化完成。")
+    # --- 把一个异步调用同步执行 ---
+    def _run(self, coroutine):
+        # coroutine：nodriver 的某个异步操作
+        # 用自己持有的事件循环跑完它并拿到结果，这样对外全是同步接口
+        return self.loop.run_until_complete(coroutine)
 
-    def __enter__(self):
-        if not self.isStarted or self.tab is None:
-            self.start()
-        return self
-
-    def __exit__(self, excType, excValue, traceback):
-        self.close()
-
-    def _run_async(self, coroutine):
-        """在共享事件循环中运行异步操作"""
-        try:
-            if self._loop is not None and not self._loop.is_closed():
-                return self._loop.run_until_complete(coroutine)
-            else:
-                return asyncio.run(coroutine)
-        except RuntimeError as e:
-            if "Event loop is closed" in str(e):
-                self._loop = asyncio.new_event_loop()
-                return self._loop.run_until_complete(coroutine)
-            raise
-
+    # --- 启动浏览器 ---
     def start(self):
-        if self.isStarted and self.tab is not None:
-            self.log("Browser 已经启动，跳过重复启动。")
+        if self.tab is not None:                            # 已经启动过就不重复启动，避免开出多个浏览器进程
             return self
 
-        self.log("正在启动 nodriver 浏览器。")
+        self.loop = asyncio.new_event_loop()                # 为本实例单独建一个事件循环，和其他实例隔离
+        asyncio.set_event_loop(self.loop)                   # 设为当前线程的默认循环，nodriver 内部会取用
 
-        try:
-            self._loop = asyncio.new_event_loop()
-            self.browser = self._loop.run_until_complete(start(headless=self.headless, user_agent=self.userAgent or self._generateRealisticUA(), viewport={"width": self.viewportWidth, "height": self.viewportHeight}, **self.browserArgs))
+        browser_args = clean_args + self.extra_args         # 合并"干净启动参数"和调用方的额外参数
+        if self.proxy:                                      # 若配置了代理，追加代理启动参数
+            browser_args.append(f"--proxy-server={self.proxy}")
 
-            # 使用 tabs 列表获取主页面，而不是有 bug 的 main_tab 属性
-            if self.browser.tabs and len(self.browser.tabs) > 0:
-                self.tab = self.browser.tabs[0]
-            else:
-                raise RuntimeError("无法获取主页面标签")
+        self.driver = self._run(nodriver.start(             # 真正拉起 Chrome 进程
+            headless=self.headless,                         # 是否无头
+            browser_args=browser_args,                      # 传入合并后的启动参数
+        ))
+        self.tab = self.driver.main_tab                     # 取主标签页作为后续所有动作的操作对象
+        self._run(self.tab.set_window_size(0, 0, *self.window))  # 设置窗口尺寸，前两个参数是左上角坐标
+        return self                                         # 返回自身，支持链式写法
 
-            self.isStarted = True
-
-            self._applyAntiDetection()
-            self.log("nodriver 浏览器启动完成。")
-        except Exception as error:
-            self.log(f"浏览器启动失败：{error}")
-            raise
-
-        return self
-
-    def _generateRealisticUA(self):
-        """生成逼真的 Chrome UA 字符串"""
-        versions = [
-            "120.0.6099.109",
-            "121.0.6167.139",
-            "122.0.6261.112",
-            "123.0.6312.106",
-            "124.0.6367.60",
-        ]
-        osInfo = [
-            "(Windows NT 10.0; Win64; x64)",
-            "(Windows NT 10.0; WOW64)",
-            "(Windows NT 11.0; Win64; x64)",
-        ]
-        version = random.choice(versions)
-        os = random.choice(osInfo)
-        return f"Mozilla/5.0 {os} AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
-
-    def _applyAntiDetection(self):
-        """应用反检测措施"""
-        self.log("正在应用反检测配置...")
-
-        self._run_async(self.tab.evaluate("Object.defineProperty(navigator, 'language', {get: () => 'zh-CN'});"))
-        self._run_async(self.tab.evaluate("Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});"))
-        self._run_async(self.tab.evaluate("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"))
-        self._run_async(self.tab.evaluate("window.chrome = {runtime: {}};"))
-        self._run_async(self.tab.evaluate("Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});"))
-        self._run_async(
-            self.tab.evaluate("""
-            Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
-            Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-        """)
-        )
-
-        self.log("反检测配置应用完成。")
-
+    # --- 关闭浏览器，释放进程和事件循环 ---
     def close(self):
-        """关闭浏览器
-
-        使用 nodriver 内置的 stop() 方法关闭，它已经处理了异步关闭和进程终止的兜底。
-        不要用 _run_async 包装 aclose()，因为 aclose 内部关闭 websocket 会破坏事件循环导致 Event loop is closed。
-        """
-        if self.browser:
+        if self.driver:                                     # 有浏览器才需要关
             try:
-                self.browser.stop()
-                self.log("浏览器已关闭。")
-            except Exception as error:
-                self.log(f"stop() 关闭出错，尝试直接终止进程：{error}")
-                try:
-                    if self.browser._process and self.browser._process.returncode is None:
-                        self.browser._process.terminate()
-                except Exception:
-                    pass
-        self.isStarted = False
-        self.tab = None
-        self.browser = None
-        if self._loop:
-            try:
-                self._loop.close()
-            except:
-                pass
-        self._loop = None
-
-    def log(self, message: str):
-        """打印日志"""
-        if self.config.isDebug:
-            print(f"[Browser] {message}")
-
-    def sleep(self, seconds: float):
-        """等待指定秒数"""
-        self.log(f"等待 {seconds} 秒。")
-        time.sleep(seconds)
-
-    def ensurePage(self) -> Tab:
-        """确保页面可用"""
-        if self.tab is None:
-            self.start()
-        return self.tab
-
-    def getPage(self):
-        """获取当前页面对象"""
-        return self.ensurePage()
-
-    def getTitle(self) -> str:
-        """获取页面标题"""
-        page = self.ensurePage()
-        # 使用 JavaScript 获取实时标题，因为 page.title 属性不会自动更新
-        try:
-            return self._run_async(page.evaluate("document.title")) or page.title
-        except:
-            return page.title
-
-    def getUrl(self) -> str:
-        """获取当前URL"""
-        page = self.ensurePage()
-        # 使用 JavaScript 获取实时URL，因为 page.url 属性不会自动更新
-        try:
-            return self._run_async(page.evaluate("document.URL")) or page.url
-        except:
-            return page.url
-
-    def normalizeSelector(self, selector: Any, timeout: Optional[int] = None) -> str:
-        """标准化选择器"""
-        if isinstance(selector, str):
-            return selector
-        if hasattr(selector, "__str__"):
-            return str(selector)
-        raise RuntimeError(f"无效 selector: {selector}")
-
-    def getTimeout(self, timeout: Optional[int], default: int) -> int:
-        """获取超时时间"""
-        return timeout if timeout is not None else default
-
-    def getRetryCount(self, retryCount: Optional[int], actionType: str) -> int:
-        """获取重试次数"""
-        if retryCount is not None:
-            return retryCount
-        return self.config.clickRetryCount if actionType == "click" else self.config.actionRetryCount
-
-    def getRetryInterval(self, retryInterval: Optional[float]) -> float:
-        """获取重试间隔"""
-        return retryInterval if retryInterval is not None else self.config.retryInterval
-
-    def hasSmartRule(
-        self,
-        showSelector: Any = None,
-        hideSelector: Any = None,
-        urlContains: str = None,
-        textContains: str = None,
-        titleContains: str = None,
-        valueIs: str = None,
-        countIs: int = None,
-        countAtLeast: int = None,
-        retryCount: int = None,
-        retryInterval: float = None,
-    ) -> bool:
-        """判断是否有智能规则"""
-        return any([showSelector, hideSelector, urlContains, textContains, titleContains, valueIs, countIs, countAtLeast, retryCount is not None, retryInterval is not None])
-
-    def wait(
-        self,
-        selector: Any,
-        state: str = "visible",
-        timeout: Optional[int] = None,
-        countIs: Optional[int] = None,
-        countAtLeast: Optional[int] = None,
-        textContains: Optional[str] = None,
-    ) -> bool:
-        """等待元素满足条件"""
-        timeout = self.getTimeout(timeout, self.config.waitTimeout)
-        endTime = time.time() + timeout / 1000
-        selector = self.normalizeSelector(selector, timeout=timeout)
-
-        self.log(f"正在等待元素状态：{selector}")
-
-        while time.time() < endTime:
-            if countIs is not None:
-                if self.count(selector) == countIs:
-                    return True
-            elif countAtLeast is not None:
-                if self.count(selector) >= countAtLeast:
-                    return True
-            elif textContains is not None:
-                text = self.getText(selector, timeout=300)
-                if text and textContains in text:
-                    return True
-            elif self.has(selector, state=state, timeout=300):
-                return True
-            time.sleep(0.1)
-
-        self.log("wait 超时。")
-        return False
-
-    def has(self, selector: Any, state: str = "attached", timeout: Optional[int] = None) -> bool:
-        """判断元素是否存在"""
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)
-
-        try:
-            element = self.getLocator(selector, timeout=timeout)
-            if element:
-                if state == "visible":
-                    return self._run_async(element.is_visible(timeout=timeout / 1000))
-                return True
-            return False
-        except Exception:
-            return False
-
-    def show(self, selector: Any, timeout: Optional[int] = None) -> bool:
-        return self.has(selector, state="visible", timeout=timeout)
-
-    def count(self, selector: Any) -> int:
-        """统计元素数量"""
-        if not selector:
-            self.log("count 失败：selector 为空。")
-            return 0
-
-        page = self.ensurePage()
-        selector = self.normalizeSelector(selector, timeout=300)
-
-        try:
-            elements = self._run_async(page.select_all(selector, timeout=0.3))
-            return len(elements) if elements else 0
-        except Exception:
-            return 0
-
-    def getText(
-        self,
-        selector: Any,
-        timeout: Optional[int] = None,
-        defaultValue: str = "",
-        isStrip: bool = True,
-    ) -> str:
-        """获取元素文本"""
-        if not selector:
-            self.log("getText 失败：selector 为空。")
-            return defaultValue
-
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)
-
-        if not self.has(selector, timeout=timeout):
-            return defaultValue
-
-        try:
-            element = self.getLocator(selector, timeout=timeout)
-            text = element.text if element else ""
-            return text.strip() if isStrip else text
-        except Exception:
-            return defaultValue
-
-    def getValue(self, selector: Any, timeout: Optional[int] = None, defaultValue: str = "") -> str:
-        """获取输入框值"""
-        if not selector:
-            self.log("getValue 失败：selector 为空。")
-            return defaultValue
-
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)
-
-        if not self.has(selector, timeout=timeout):
-            return defaultValue
-
-        try:
-            element = self.getLocator(selector, timeout=timeout)
-            return self._run_async(element.get_attribute("value")) if element else defaultValue
-        except Exception:
-            return defaultValue
-
-    def getHtml(
-        self,
-        selector: Any,
-        timeout: Optional[int] = None,
-        defaultValue: str = "",
-        isOuter: bool = False,
-    ) -> str:
-        """获取元素HTML"""
-        if not selector:
-            self.log("getHtml 失败：selector 为空。")
-            return defaultValue
-
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)
-
-        if not self.has(selector, state="attached", timeout=timeout):
-            return defaultValue
-
-        try:
-            element = self.getLocator(selector, timeout=timeout)
-            return self._run_async(element.get_html()) if element else defaultValue
-        except Exception:
-            return defaultValue
-
-    def isChecked(self, selector: Any, timeout: Optional[int] = None) -> bool:
-        """判断复选框是否勾选"""
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)
-
-        if not self.has(selector, timeout=timeout):
-            return False
-
-        try:
-            element = self.getLocator(selector, timeout=timeout)
-            return self._run_async(element.is_checked()) if element else False
-        except Exception:
-            return False
-
-    def isDisabled(self, selector: Any, timeout: Optional[int] = None) -> bool:
-        """判断元素是否禁用"""
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)
-
-        if not self.has(selector, timeout=timeout):
-            return False
-
-        try:
-            element = self.getLocator(selector, timeout=timeout)
-            return self._run_async(element.get_attribute("disabled")) is not None if element else False
-        except Exception:
-            return False
-
-    def find(self, selector: Any, timeout: Optional[int] = None):
-        """查找元素"""
-        if not selector:
-            self.log("find 失败：selector 为空。")
-            return None
-
-        timeout = self.getTimeout(timeout, self.config.resultTimeout)
-
-        if not self.has(selector, state="attached", timeout=timeout):
-            self.log(f"find 失败：元素未出现 -> {selector}")
-            return None
-
-        try:
-            return self.getLocator(selector, timeout=timeout)
-        except Exception as error:
-            self.log(f"find 失败：{error}")
-            return None
-
-    def getLocator(self, selector: Any, timeout: Optional[int] = None):
-        """获取元素定位器"""
-        page = self.ensurePage()
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        return self._run_async(page.select_one(selector, timeout=timeout / 1000))
-
-    def isPageReady(self) -> bool:
-        """检查页面是否就绪"""
-        page = self.ensurePage()
-        try:
-            state = self._run_async(page.evaluate("document.readyState"))
-            return state in ["interactive", "complete"]
-        except Exception:
-            return False
-
-    def waitPageReady(self, timeout: Optional[int] = None) -> bool:
-        """等待页面进入可操作状态"""
-        timeout = self.getTimeout(timeout, self.config.waitTimeout)
-        endTime = time.time() + timeout / 1000
-
-        self.log("正在等待页面进入可操作状态。")
-
-        while time.time() < endTime:
-            if self.isPageReady():
-                return True
-            time.sleep(0.2)
-        return False
-
-    def openPage(self, url: Optional[str] = None, showSelector: Optional[Any] = None) -> bool:
-        """打开新页面"""
-        if url:
-            return self.goto(url, showSelector=showSelector)
-        self.log(f"当前 page 是否可用：{self.tab is not None}")
-        return self.tab is not None
-
-    def goto(
-        self,
-        url: str,
-        timeout: Optional[int] = None,
-        waitUntil: str = "load",
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
-        textContains: Optional[str] = None,
-        titleContains: Optional[str] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-        **kwargs,
-    ) -> bool:
-        """打开URL"""
-        if not url:
-            self.log("goto 失败：url 为空。")
-            return False
-
-        page = self.ensurePage()
-        timeout = self.getTimeout(timeout, self.config.gotoTimeout)
-        isSmart = self.hasSmartRule(
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains,
-            textContains=textContains,
-            titleContains=titleContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-        self.log(f"正在打开页面：{url}")
-
-        def action():
-            self._run_async(page.get(url))
-            self.waitPageReady(timeout=min(timeout, self.config.waitTimeout))
-
-        if not isSmart:
-            try:
-                action()
-                self.log("页面打开完成。")
-                return True
-            except Exception as error:
-                self.log(f"goto 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="goto",
-            actionFunc=action,
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains or url,
-            textContains=textContains,
-            titleContains=titleContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def reload(
-        self,
-        timeout: Optional[int] = None,
-        waitUntil: str = "domcontentloaded",
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
-        textContains: Optional[str] = None,
-        titleContains: Optional[str] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """刷新页面"""
-        page = self.ensurePage()
-        timeout = self.getTimeout(timeout, self.config.gotoTimeout)
-        isSmart = self.hasSmartRule(
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains,
-            textContains=textContains,
-            titleContains=titleContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-        self.log("正在刷新页面。")
-
-        def action():
-            try:
-                self._run_async(page.reload())
-            except Exception as error:
-                self.log(f"reload 底层调用报错，但继续检查页面状态：{error}")
-            self.waitPageReady(timeout=min(timeout, self.config.waitTimeout))
-
-        if not isSmart:
-            try:
-                action()
-                self.log("页面刷新完成。")
-                return True
-            except Exception as error:
-                self.log(f"reload 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="reload",
-            actionFunc=action,
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains,
-            textContains=textContains,
-            titleContains=titleContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def back(
-        self,
-        timeout: Optional[int] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """后退"""
-        page = self.ensurePage()
-        timeout = self.getTimeout(timeout, self.config.gotoTimeout)
-        retryCount = self.getRetryCount(retryCount, "back")
-        retryInterval = self.getRetryInterval(retryInterval)
-
-        self.log("正在执行后退。")
-
-        for index in range(retryCount + 1):
-            attempt = index + 1
-            beforeUrl = page.url
-
-            self.log(f"back 第 {attempt} 次尝试开始，当前地址：{beforeUrl}")
-
-            try:
-                self._run_async(page.go_back())
-            except Exception as error:
-                self.log(f"go_back 报错，尝试 history.back() 兜底：{error}")
-                self._run_async(page.evaluate("history.back()"))
-
-            self.waitPageReady(timeout=min(timeout, self.config.waitTimeout))
-
-            currentUrl = page.url
-            if currentUrl != beforeUrl:
-                self.log(f"后退成功，当前地址：{currentUrl}")
-                return True
-
-            if index < retryCount:
-                self.log(f"back 第 {attempt} 次未成功，等待 {retryInterval} 秒后重试。")
-                time.sleep(retryInterval)
-
-        self.log("back 失败：无法后退。")
-        return False
-
-    def forward(
-        self,
-        timeout: Optional[int] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """前进"""
-        page = self.ensurePage()
-        timeout = self.getTimeout(timeout, self.config.gotoTimeout)
-        retryCount = self.getRetryCount(retryCount, "forward")
-        retryInterval = self.getRetryInterval(retryInterval)
-
-        self.log("正在执行前进。")
-
-        for index in range(retryCount + 1):
-            attempt = index + 1
-            beforeUrl = page.url
-
-            self.log(f"forward 第 {attempt} 次尝试开始，当前地址：{beforeUrl}")
-
-            try:
-                self._run_async(page.go_forward())
-            except Exception as error:
-                self.log(f"go_forward 报错，尝试 history.forward() 兜底：{error}")
-                self._run_async(page.evaluate("history.forward()"))
-
-            self.waitPageReady(timeout=min(timeout, self.config.waitTimeout))
-
-            currentUrl = page.url
-            if currentUrl != beforeUrl:
-                self.log(f"前进成功，当前地址：{currentUrl}")
-                return True
-
-            if index < retryCount:
-                self.log(f"forward 第 {attempt} 次未成功，等待 {retryInterval} 秒后重试。")
-                time.sleep(retryInterval)
-
-        self.log("forward 失败：无法前进。")
-        return False
-
-    def tryClick(self, selector: Any, timeout: int, isForce: bool = False):
-        """尝试点击元素"""
-        element = self.getLocator(selector, timeout=timeout)
-        if not element:
-            raise RuntimeError("元素不存在")
-
-        self._run_async(element.scroll_into_view())
-
-        if isForce:
-            self._run_async(element.click(force=True))
-            return
-
-        try:
-            self._run_async(element.click())
-            return
-        except Exception:
-            pass
-
-        try:
-            self._run_async(element.click(force=True))
-            return
-        except Exception:
-            pass
-
-        self.evaluate(f"document.querySelector('{selector}')?.click()")
-
-    def click(
-        self,
-        selector: Any,
-        timeout: Optional[int] = None,
-        button: str = "left",
-        clickCount: int = 1,
-        delay: Optional[int] = None,
-        modifiers: Optional[list] = None,
-        position: Optional[dict] = None,
-        isForce: bool = False,
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
-        textContains: Optional[str] = None,
-        titleContains: Optional[str] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """点击元素"""
-        if not selector:
-            self.log("click 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        isSmart = self.hasSmartRule(
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains,
-            textContains=textContains,
-            titleContains=titleContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-        self.log(f"正在点击元素：{selector}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"click 失败：元素未出现 -> {selector}")
-            return False
-
-        def action():
-            self.tryClick(selector, timeout=timeout, isForce=isForce)
-
-        if not isSmart:
-            try:
-                action()
-                self.log("点击完成。")
-                return True
-            except Exception as error:
-                self.log(f"click 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="click",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains,
-            textContains=textContains,
-            titleContains=titleContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def fill(
-        self,
-        selector: Any,
-        value: str,
-        timeout: Optional[int] = None,
-        isClear: bool = True,
-        valueIs: Optional[str] = None,
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """填写输入框"""
-        if not selector:
-            self.log("fill 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        expectedValue = value if valueIs is None else valueIs
-        isSmart = self.hasSmartRule(
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            valueIs=expectedValue if (valueIs is not None or showSelector or hideSelector or retryCount is not None or retryInterval is not None) else None,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-        self.log(f"正在填写输入框：{selector}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"fill 失败：输入框未出现 -> {selector}")
-            return False
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.scroll_into_view())
-            if isClear:
-                self._run_async(element.clear())
-            self._run_async(element.send_keys(value))
-
-        if not isSmart:
-            try:
-                action()
-                self.log("填写完成。")
-                return True
-            except Exception as error:
-                self.log(f"fill 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="fill",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            valueIs=expectedValue,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def press(
-        self,
-        selector: Any,
-        key: str,
-        timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        hideSelector: Optional[Any] = None,
-        urlContains: Optional[str] = None,
-        textContains: Optional[str] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """按键"""
-        if not selector:
-            self.log("press 失败：selector 为空。")
-            return False
-
-        if not key:
-            self.log("press 失败：key 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        isSmart = self.hasSmartRule(
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains,
-            textContains=textContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-        self.log(f"正在按键：{key} -> {selector}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"press 失败：元素未出现 -> {selector}")
-            return False
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.scroll_into_view())
-            self._run_async(element.focus())
-
-            key_map = {
-                "Enter": "\r",
-                "Tab": "\t",
-                "Escape": "\x1b",
-                "Backspace": "\x08",
-                "Delete": "\x7f",
-                "ArrowUp": "\x1b[A",
-                "ArrowDown": "\x1b[B",
-                "ArrowLeft": "\x1b[D",
-                "ArrowRight": "\x1b[C",
-                "Home": "\x1b[H",
-                "End": "\x1b[F",
-                "PageUp": "\x1b[5~",
-                "PageDown": "\x1b[6~",
-                "F1": "\x1bOP",
-                "F2": "\x1bOQ",
-                "F3": "\x1bOR",
-                "F4": "\x1bOS",
-                "F5": "\x1b[15~",
-                "F6": "\x1b[17~",
-                "F7": "\x1b[18~",
-                "F8": "\x1b[19~",
-                "F9": "\x1b[20~",
-                "F10": "\x1b[21~",
-                "F11": "\x1b[23~",
-                "F12": "\x1b[24~",
-                "Shift": "\x1b[1;2A",
-                "Control": "\x1b[1;5A",
-                "Alt": "\x1b[1;3A",
-                "Meta": "\x1b[1;9A",
-            }
-
-            nodriver_key = key_map.get(key, key)
-            self._run_async(element.send_keys(nodriver_key))
-
-        if not isSmart:
-            try:
-                action()
-                self.log("按键完成。")
-                return True
-            except Exception as error:
-                self.log(f"press 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="press",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            hideSelector=hideSelector,
-            urlContains=urlContains,
-            textContains=textContains,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def screenshot(
-        self,
-        path: Optional[str] = None,
-        fullPage: bool = True,
-        timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        **kwargs,
-    ) -> str:
-        """截图"""
-        page = self.ensurePage()
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-
-        if showSelector:
-            self.wait(showSelector, timeout=timeout)
-
-        if not path:
-            path = f"browser-shot-{int(time.time())}.png"
-
-        self.log(f"正在截图：{path}")
-
-        try:
-            self._run_async(page.screenshot(path=path, full_page=fullPage))
-            self.log("截图完成。")
-            return path
-        except Exception as error:
-            self.log(f"screenshot 失败：{error}")
-            return ""
-
-    def evaluate(self, script: str, arg: Any = None, defaultValue: Any = None) -> Any:
-        """执行页面脚本"""
-        if not script:
-            self.log("evaluate 失败：script 为空。")
-            return defaultValue
-
-        page = self.ensurePage()
-        self.log("正在执行页面脚本。")
-
-        try:
-            if arg is None:
-                return self._run_async(page.evaluate(script))
-            return self._run_async(page.evaluate(script, arg))
-        except Exception as error:
-            self.log(f"evaluate 失败：{error}")
-            return defaultValue
-
-    def dblclick(
-        self,
-        selector: Any,
-        timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """双击元素"""
-        if not selector:
-            self.log("dblclick 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        isSmart = self.hasSmartRule(showSelector=showSelector, retryCount=retryCount, retryInterval=retryInterval)
-
-        self.log(f"正在双击元素：{selector}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"dblclick 失败：元素未出现 -> {selector}")
-            return False
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.scroll_into_view())
-            self._run_async(element.dblclick())
-
-        if not isSmart:
-            try:
-                action()
-                self.log("双击完成。")
-                return True
-            except Exception as error:
-                self.log(f"dblclick 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="dblclick",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def hover(
-        self,
-        selector: Any,
-        timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """鼠标悬停"""
-        if not selector:
-            self.log("hover 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        isSmart = self.hasSmartRule(showSelector=showSelector, retryCount=retryCount, retryInterval=retryInterval)
-
-        self.log(f"正在悬停元素：{selector}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"hover 失败：元素未出现 -> {selector}")
-            return False
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.scroll_into_view())
-            self._run_async(element.hover())
-
-        if not isSmart:
-            try:
-                action()
-                self.log("悬停完成。")
-                return True
-            except Exception as error:
-                self.log(f"hover 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="hover",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def type(
-        self,
-        selector: Any,
-        value: str,
-        timeout: Optional[int] = None,
-        delay: Optional[int] = None,
-        isClear: bool = True,
-        valueIs: Optional[str] = None,
-        showSelector: Optional[Any] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """逐字输入"""
-        if not selector:
-            self.log("type 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        delay = delay if delay is not None else self.config.typeDelay
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        expectedValue = value if valueIs is None else valueIs
-        isSmart = self.hasSmartRule(
-            showSelector=showSelector,
-            valueIs=expectedValue if (valueIs is not None or showSelector or retryCount is not None or retryInterval is not None) else None,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-        self.log(f"正在逐字输入：{selector}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"type 失败：输入框未出现 -> {selector}")
-            return False
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.scroll_into_view())
-            self._run_async(element.click())
-            if isClear:
-                self._run_async(element.clear())
-            self._run_async(element.send_keys(value, delay=delay / 1000))
-
-        if not isSmart:
-            try:
-                action()
-                self.log("逐字输入完成。")
-                return True
-            except Exception as error:
-                self.log(f"type 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="type",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            valueIs=expectedValue,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def check(
-        self,
-        selector: Any,
-        timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """勾选复选框"""
-        if not selector:
-            self.log("check 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        isSmart = self.hasSmartRule(showSelector=showSelector, retryCount=retryCount, retryInterval=retryInterval)
-
-        self.log(f"正在勾选复选框：{selector}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"check 失败：元素未出现 -> {selector}")
-            return False
-
-        if self.isChecked(selector, timeout=timeout):
-            self.log("复选框已经是勾选状态。")
-            return True
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.check())
-            if not self.isChecked(selector, timeout=timeout):
-                raise RuntimeError("复选框勾选后状态仍未变为选中。")
-
-        if not isSmart:
-            try:
-                action()
-                self.log("勾选完成。")
-                return True
-            except Exception as error:
-                self.log(f"check 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="check",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def uncheck(
-        self,
-        selector: Any,
-        timeout: Optional[int] = None,
-        hideSelector: Optional[Any] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """取消勾选复选框"""
-        if not selector:
-            self.log("uncheck 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        isSmart = self.hasSmartRule(hideSelector=hideSelector, retryCount=retryCount, retryInterval=retryInterval)
-
-        self.log(f"正在取消勾选复选框：{selector}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"uncheck 失败：元素未出现 -> {selector}")
-            return False
-
-        if not self.isChecked(selector, timeout=timeout):
-            self.log("复选框已经是未勾选状态。")
-            return True
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.uncheck())
-            if self.isChecked(selector, timeout=timeout):
-                raise RuntimeError("复选框取消勾选后仍然是选中状态。")
-
-        if not isSmart:
-            try:
-                action()
-                self.log("取消勾选完成。")
-                return True
-            except Exception as error:
-                self.log(f"uncheck 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="uncheck",
-            actionFunc=action,
-            selector=selector,
-            hideSelector=hideSelector,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def select(
-        self,
-        selector: Any,
-        value: Any,
-        timeout: Optional[int] = None,
-        showSelector: Optional[Any] = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """下拉选择"""
-        if not selector:
-            self.log("select 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-        isSmart = self.hasSmartRule(showSelector=showSelector, retryCount=retryCount, retryInterval=retryInterval)
-
-        self.log(f"正在选择下拉项：{selector} -> {value}")
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"select 失败：元素未出现 -> {selector}")
-            return False
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.scroll_into_view())
-            self._run_async(element.select(value))
-
-        if not isSmart:
-            try:
-                action()
-                self.log("下拉选择完成。")
-                return True
-            except Exception as error:
-                self.log(f"select 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="select",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-            retryCount=retryCount,
-            retryInterval=retryInterval,
-        )
-
-    def focus(self, selector: Any, timeout: Optional[int] = None) -> bool:
-        """聚焦元素"""
-        if not selector:
-            self.log("focus 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"focus 失败：元素未出现 -> {selector}")
-            return False
-
-        try:
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.focus())
-            self.log(f"已聚焦元素：{selector}")
-            return True
-        except Exception as error:
-            self.log(f"focus 失败：{error}")
-            return False
-
-    def blur(self, selector: Any, timeout: Optional[int] = None, showSelector: Optional[Any] = None) -> bool:
-        """失焦元素"""
-        if not selector:
-            self.log("blur 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-
-        if not self.has(selector, timeout=timeout):
-            self.log(f"blur 失败：元素未出现 -> {selector}")
-            return False
-
-        def action():
-            element = self.getLocator(selector, timeout=timeout)
-            self._run_async(element.blur())
-
-        if not showSelector:
-            try:
-                action()
-                self.log(f"已让元素失焦：{selector}")
-                return True
-            except Exception as error:
-                self.log(f"blur 失败：{error}")
-                return False
-
-        return self.runAction(
-            actionName="blur",
-            actionFunc=action,
-            selector=selector,
-            showSelector=showSelector,
-        )
-
-    def scroll(self, selector: Optional[Any] = None, position: Optional[str] = None) -> bool:
-        """滚动页面"""
-        page = self.ensurePage()
-        self.log("正在执行滚动。")
-
-        try:
-            if selector:
-                selector = self.normalizeSelector(selector, timeout=600)
-                element = self.getLocator(selector, timeout=600)
-                self._run_async(element.scroll_into_view())
-                self.log(f"已滚动到元素位置：{selector}")
-                return True
-
-            if position == "top":
-                self._run_async(page.evaluate("window.scrollTo(0, 0)"))
-                self.log("已滚动到页面顶部。")
-                return True
-
-            if position == "bottom":
-                self._run_async(page.evaluate("window.scrollTo(0, document.body.scrollHeight)"))
-                self.log("已滚动到页面底部。")
-                return True
-
-            self._run_async(page.mouse.wheel(0, 800))
-            self.log("已执行一次普通向下滚动。")
-            return True
-        except Exception as error:
-            self.log(f"滚动失败：{error}")
-            return False
-
-    def remove(self, selector: Any, timeout: Optional[int] = None) -> bool:
-        """移除元素"""
-        if not selector:
-            self.log("remove 失败：selector 为空。")
-            return False
-
-        timeout = self.getTimeout(timeout, self.config.actionTimeout)
-        selector = self.normalizeSelector(selector, timeout=timeout)
-
-        if not self.has(selector, state="attached", timeout=timeout):
-            self.log(f"remove 跳过：元素本来就不存在 -> {selector}")
-            return True
-
-        self.log(f"正在从页面中移除元素：{selector}")
-
-        try:
-            self.evaluate(f"""
-                const elements = document.querySelectorAll('{selector}');
-                elements.forEach(el => el.remove());
-            """)
-            self.log("元素移除完成。")
-            return True
-        except Exception as error:
-            self.log(f"remove 失败：{error}")
-            return False
-
-    def runAction(
-        self,
-        actionName: str,
-        actionFunc: Callable,
-        selector: Any = None,
-        showSelector: Any = None,
-        hideSelector: Any = None,
-        urlContains: str = None,
-        textContains: str = None,
-        titleContains: str = None,
-        valueIs: str = None,
-        retryCount: Optional[int] = None,
-        retryInterval: Optional[float] = None,
-    ) -> bool:
-        """执行带重试和验证的动作"""
-        retryCount = self.getRetryCount(retryCount, actionName)
-        retryInterval = self.getRetryInterval(retryInterval)
-
-        for index in range(retryCount + 1):
-            attempt = index + 1
-            self.log(f"{actionName} 第 {attempt} 次尝试开始。")
-
-            try:
-                actionFunc()
-            except Exception as error:
-                self.log(f"{actionName} 第 {attempt} 次动作报错：{error}")
-                if index < retryCount:
-                    self.log(f"{actionName} 第 {attempt} 次未达到预期，等待 {retryInterval} 秒后重试。")
-                    time.sleep(retryInterval)
-                    continue
-                else:
-                    self.log(f"{actionName} 已达到最大尝试次数，但仍未成功。")
-                    return False
-
-            if self._checkActionResult(
-                showSelector=showSelector,
-                hideSelector=hideSelector,
-                urlContains=urlContains,
-                textContains=textContains,
-                titleContains=titleContains,
-                valueIs=valueIs,
-                selector=selector,
-            ):
-                self.log(f"{actionName} 完成。")
-                return True
-
-            if index < retryCount:
-                self.log(f"{actionName} 第 {attempt} 次未达到预期，等待 {retryInterval} 秒后重试。")
-                time.sleep(retryInterval)
-
-        self.log(f"{actionName} 已达到最大尝试次数，但仍未成功。")
-        return False
-
-    def _checkActionResult(
-        self,
-        showSelector: Any = None,
-        hideSelector: Any = None,
-        urlContains: str = None,
-        textContains: str = None,
-        titleContains: str = None,
-        valueIs: str = None,
-        selector: Any = None,
-    ) -> bool:
-        """检查动作执行结果"""
-        checkItems = []
-
-        if showSelector:
-            checkItems.append(lambda: self.has(showSelector, state="visible", timeout=1000))
-        if hideSelector:
-            checkItems.append(lambda: not self.has(hideSelector, state="attached", timeout=1000))
-        if urlContains:
-            checkItems.append(lambda: urlContains in self.getUrl())
-        if textContains:
-            checkItems.append(lambda: textContains in self.getText("body", timeout=1000))
-        if titleContains:
-            checkItems.append(lambda: titleContains in self.getTitle())
-        if valueIs and selector:
-            checkItems.append(lambda: self.getValue(selector, timeout=1000) == valueIs)
-
-        if not checkItems:
-            return True
-
-        for check in checkItems:
-            try:
-                if not check():
-                    return False
+                connections = [*self.driver.tabs, getattr(self.driver, "connection", None)]
+                for connection in connections:             # 每个标签页和浏览器本身都有独立 WebSocket
+                    if connection:
+                        self._run(connection.disconnect())  # 逐个等到真正断开，不能只排队后立刻关事件循环
+                process = getattr(self.driver, "_process", None)
+                if process:
+                    process.terminate()                     # nodriver.stop 会重复排队断连，这里只负责结束进程
+                    self._run(process.wait())               # 等 returncode 更新，避免 atexit 再次误判为运行中
             except Exception:
-                return False
+                pass                                        # 关闭时的异常不影响主流程，静默忽略
+        if self.loop:                                       # 有事件循环才需要关
+            try:
+                self._drain()                               # 先跑完关闭 Chrome 时挂起的收尾回调
+                self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+                self.loop.close()                           # 收尾完成后再关循环
+            except Exception:
+                pass
+        self.driver = None                                  # 清空引用，标记已关闭
+        self.tab = None
+        self.loop = None
 
+    # --- 给事件循环一点时间跑完挂起的收尾回调 ---
+    def _drain(self):
+        try:
+            pending = [task for task in asyncio.all_tasks(self.loop) if not task.done()]
+            for task in pending:
+                task.cancel()                               # update_targets/keepalive 等后台任务不能留到关循环后
+            if pending:
+                self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self.loop.run_until_complete(asyncio.sleep(0.25))
+        except Exception:
+            pass
+
+    # ==================== 元素查找层 ====================
+
+    # --- 按选择器找一个元素，找不到返回 None ---
+    def locate(self, selector, timeout=8):
+        # selector：CSS 选择器、XPath、页面可见文字，或带 css=/xpath=/text= 前缀的显式指定
+        # timeout：最多找多少秒
+        # 返回元素对象或 None，是所有动作定位元素的统一入口
+        if isinstance(selector, (list, tuple)):            # 候选列表按顺序尝试，适合多语言文案和新版/旧版页面
+            each_timeout = max(0.5, timeout / max(1, len(selector)))  # 总等待时间大致保持不变
+            for item in selector:
+                element = self.locate(item, timeout=each_timeout)  # 递归复用单选择器规则
+                if element:
+                    return element                         # 第一个命中的候选立即返回
+            return None                                    # 所有候选都找不到
+        try:
+            kind, expr = self._parse_selector(selector)    # 拆分前缀和表达式，统一判定类型
+            if kind == "xpath":
+                elements = self._run(self.tab.xpath(expr, timeout=timeout))
+                return elements[0] if elements else None
+            if kind == "css":
+                return self._run(self.tab.select(expr, timeout=timeout))
+            if kind == "text":
+                return self._run(self.tab.find(expr, timeout=timeout))  # 显式文字查找
+            # 自动模式先按 CSS 查找；纯标签 button/input 也能正确定位。CSS 找不到再按可见文字兜底。
+            try:
+                element = self._run(self.tab.select(expr, timeout=min(timeout, 2)))
+                if element:
+                    return element
+            except Exception:
+                pass                                       # 普通文字可能不是合法 CSS，继续走文字查找
+            return self._run(self.tab.find(expr, timeout=timeout))
+        except Exception:
+            return None                                     # 超时或选择器无效都归为"没找到"
+
+    # --- 解析选择器，返回 (类型, 表达式) ---
+    def _parse_selector(self, selector):
+        # 支持显式前缀 css= / xpath= / text=，优先使用；无前缀时自动推断
+        if selector.startswith("css="):                     # 显式 CSS
+            return ("css", selector[4:])
+        if selector.startswith("xpath="):                   # 显式 XPath
+            return ("xpath", selector[6:])
+        if selector.startswith("text="):                    # 显式文字
+            return ("text", selector[5:])
+
+        # 自动推断：以 / 或 ( 开头 → XPath
+        if selector.startswith("/") or selector.startswith("("):
+            return ("xpath", selector)
+        # 含典型 CSS 特征字符 → CSS（包括 tag.class、tag#id、属性选择器等）
+        if any(ch in selector for ch in ".#[:>~+"):
+            return ("css", selector)
+        # 其余进入自动模式：先试 CSS 标签名，再按页面可见文字找
+        return ("auto", selector)
+
+    # --- 判断元素是否存在 ---
+    def exists(self, selector, timeout=3):
+        return self.locate(selector, timeout=timeout) is not None
+
+    # --- 判断元素当前是否真正可见 ---
+    def visible(self, selector, timeout=3):
+        # DOM 里存在不等于能看到；display:none、visibility:hidden、零尺寸都应返回 False
+        try:
+            element = self.locate(selector, timeout=timeout)  # 先定位真实元素
+            if not element:
+                return False
+            script = "(elem) => { const s=getComputedStyle(elem); const r=elem.getBoundingClientRect(); return s.display!=='none' && s.visibility!=='hidden' && Number(s.opacity)!==0 && r.width>0 && r.height>0; }"
+            return bool(self._run(element.apply(script)))   # 在元素上下文读取实时样式和尺寸
+        except Exception:
+            return False
+
+    # ==================== 智能判断核心 ====================
+
+    # --- 检查一组"期望结果"是否全部达成 ---
+    def check(self, appear=None, vanish=None, url_has=None, text_has=None):
+        if appear and not self.visible(appear, timeout=1):  # appear 的自然含义是“用户看得见”，不只是 DOM 已挂载
+            return False
+        if vanish and self.visible(vanish, timeout=1):      # 隐藏但仍留在 DOM 里也算已经消失
+            return False
+        if url_has and url_has not in self.url():
+            return False
+        if text_has and text_has not in self.text():
+            return False
         return True
 
-    def waitUrlChange(self, oldUrl: str, timeout: Optional[int] = None) -> bool:
-        """等待URL变化"""
-        timeout = self.getTimeout(timeout, self.config.waitTimeout)
-        endTime = time.time() + timeout / 1000
+    # --- 反复执行一个动作直到期望达成或超时（所有智能动作的引擎） ---
+    def act(self, do, appear=None, vanish=None, url_has=None, text_has=None, tries=3, gap=1.0, replay=True):
+        has_expect = any([appear, vanish, url_has, text_has])
+        did_run = False                                    # 记录动作是否已经真正执行成功
 
-        while time.time() < endTime:
-            if self.getUrl() != oldUrl:
+        for attempt in range(tries):
+            if not did_run or replay:                      # 可重放动作每轮执行；副作用动作成功执行一次后只检查结果
+                done = do()
+                did_run = did_run or done                  # 定位失败不算执行，后续仍可继续找元素
+            else:
+                done = True                                # 已点击过，本轮只轮询后置条件，不重复点击
+
+            if not has_expect:
+                if done:
+                    return True
+            else:
+                if done and self.check(appear, vanish, url_has, text_has):
+                    return True
+
+            time.sleep(gap)
+
+        return False
+
+    # ==================== 页面动作层 ====================
+
+    # --- 打开网址 ---
+    def open(self, url, appear=None, text_has=None, tries=2, gap=1.0):
+        # url：要打开的地址
+        def do():
+            self._run(self.tab.get(url))
+            return True
+
+        return self.act(do, appear=appear, text_has=text_has, tries=tries, gap=gap)
+
+    # --- 点击元素 ---
+    def click(
+        self, selector, appear=None, vanish=None, url_has=None, text_has=None,
+        tries=3, gap=1.0, repeat=False, skip_if_done=False,
+    ):
+        # selector：要点击的元素
+        # repeat：默认 False，成功点击一次后只等待结果，避免重复注册/发码；明确需要连点时才开启
+        # skip_if_done：恢复中断流程时可设 True，若目标状态已成立就不再点击
+        has_expect = any([appear, vanish, url_has, text_has])  # 是否提供了可验证的成功结果
+        if skip_if_done and has_expect and self.check(appear, vanish, url_has, text_has):
+            return True                                    # 目标状态本来就成立，直接成功，避免恢复运行时重复提交
+
+        def do():
+            element = self.locate(selector)
+            if not element:
+                return False
+            self._run(self.tab.activate())                  # 后台窗口先激活当前 target，保证 CDP 鼠标事件被页面接收
+            self._run(element.scroll_into_view())
+            self._run(element.focus())                      # 元素获得页面焦点后再点击，避免失焦窗口吞掉事件
+            self._run(element.click())
+            return True
+
+        return self.act(
+            do, appear=appear, vanish=vanish, url_has=url_has, text_has=text_has,
+            tries=tries, gap=gap, replay=repeat,
+        )
+
+    # --- 填写输入框（清空后整串写入，速度快） ---
+    def fill(self, selector, value, appear=None, vanish=None, verify=False, value_is=None, tries=3, gap=1.0):
+        # selector：目标输入框
+        # value：要填入的文字
+        # verify：填完后是否回读校验
+        # value_is：指定期望读回值；传入后自动开启校验，不传则期望值就是 value
+        expected = str(value if value_is is None else value_is)  # 统一期望类型，避免数字和字符串比较失败
+        def do():
+            element = self.locate(selector)
+            if not element:
+                return False
+            self._run(element.scroll_into_view())
+            self._run(element.clear_input())
+            self._run(element.send_keys(str(value)))
+            if verify or value_is is not None:              # 需要回读校验：填完立刻读回来精确对比
+                actual = self._get_value(element)
+                if actual != expected:                      # 表单实际值和期望不同 → 填写失败并触发重试
+                    return False
+            return True
+
+        return self.act(do, appear=appear, vanish=vanish, tries=tries, gap=gap)
+
+    # --- 逐字缓慢输入（触发 JS 逐字事件校验的站点必须用这个） ---
+    def type(
+        self, selector, value, delay=0.05, appear=None, vanish=None,
+        verify=False, value_is=None, tries=3, gap=1.0, repeat=False,
+    ):
+        # delay：每个字符之间的间隔秒数，模拟真人打字速度
+        # repeat：默认只输入一次并等待后置条件，避免 OTP 自动提交后再次输入；明确需要重填才开启
+        expected = str(value if value_is is None else value_is)  # 输入完成后用于精确回读
+
+        def do():
+            element = self.locate(selector)
+            if not element:
+                return False
+            self._run(element.scroll_into_view())
+            self._run(element.clear_input())
+            for char in str(value):                         # 逐字符一个一个输入
+                self._run(element.send_keys(char))
+                time.sleep(delay)                           # 每个字符之间暂停一下，让 JS 事件来得及触发
+            if verify or value_is is not None:
+                actual = self._get_value(element)
+                if actual != expected:
+                    return False
+            return True
+
+        return self.act(do, appear=appear, vanish=vanish, tries=tries, gap=gap, replay=repeat)
+
+    # --- 一次填多个字段（传入字典 {选择器: 值}） ---
+    def fill_form(self, fields, verify=False, tries=3, gap=0.5):
+        # fields：字典，键是输入框选择器，值是要填入的文字
+        # 返回 True 表示全部字段都填成功
+        for selector, value in fields.items():
+            ok = self.fill(selector, value, verify=verify, tries=tries, gap=gap)
+            if not ok:
+                return False                                # 任何一个字段填失败就整体失败
+        return True
+
+    # --- 上传文件 ---
+    def upload(self, selector, filepath):
+        # selector：文件上传的 input[type=file] 元素
+        # filepath：要上传的本地文件路径
+        try:
+            element = self.locate(selector)
+            if not element:
+                return False
+            self._run(element.send_file(filepath))          # nodriver 的文件上传方法
+            return True
+        except Exception:
+            return False
+
+    # --- 在元素上按键 ---
+    def press(self, selector, key):
+        # 常用控制键转成 nodriver 能发送的字符；普通文字会原样输入
+        keys = {"Enter": "\n", "Tab": "\t", "Escape": "\x1b", "Backspace": "\b"}
+        try:
+            element = self.locate(selector)                # 按键前先把目标输入框或按钮找出来
+            if not element:
+                return False
+            self._run(element.focus())                     # 聚焦后按键才会发给正确元素
+            self._run(element.send_keys(keys.get(key, key)))  # 控制键转换，普通字符原样发送
+            return True
+        except Exception:
+            return False
+
+    # --- 鼠标移到元素上 ---
+    def hover(self, selector):
+        try:
+            element = self.locate(selector)                # 找到要悬停的菜单或按钮
+            if not element:
+                return False
+            self._run(element.scroll_into_view())          # 先滚进视口再移动鼠标
+            self._run(element.mouse_move())                # 移到元素中心，触发 mouseover/hover
+            return True
+        except Exception:
+            return False
+
+    # --- 设置复选框状态 ---
+    def check_box(self, selector, checked=True):
+        try:
+            element = self.locate(selector)                # 找到 checkbox/radio 元素
+            if not element:
+                return False
+            wanted = "true" if checked else "false"        # 转成 JS 布尔字面量
+            script = f"(elem) => {{ if (Boolean(elem.checked) !== {wanted}) elem.click(); return Boolean(elem.checked); }}"
+            actual = self._run(element.apply(script))      # 状态不同时点击一次，并返回最终状态
+            return bool(actual) is bool(checked)           # 最终状态符合期望才算成功
+        except Exception:
+            return False
+
+    # --- 选择下拉框选项 ---
+    def select(self, selector, value):
+        try:
+            element = self.locate(selector)                # 找到 select 元素
+            if not element:
+                return False
+            safe = json.dumps(str(value))                  # JSON 编码避免值里的引号破坏 JS
+            actual = self._run(element.apply(f"(elem) => {{ elem.value = {safe}; return elem.value; }}"))
+            if str(actual) != str(value):                   # 浏览器没有接受该 value，通常是 option 不存在
+                return False
+            try:
+                # 某些页面的隔离执行环境不提供 Event 构造器，所以事件派发单独兜底，不影响已设置的值。
+                script = "(elem) => { elem.dispatchEvent(new Event('input', {bubbles:true})); elem.dispatchEvent(new Event('change', {bubbles:true})); }"
+                self._run(element.apply(script))           # 通知 React/Vue 等前端框架下拉值已变化
+            except Exception:
+                pass                                       # 值已经回读成功，事件环境差异不应把操作误判为失败
+            return True                                    # 设置和回读都成功
+        except Exception:
+            return False
+
+    # --- 从页面移除元素（遮挡层/广告等调试场景） ---
+    def remove(self, selector):
+        try:
+            element = self.locate(selector)                # 找到要移除的遮挡元素
+            if not element:
+                return True                                # 本来就不存在，目标状态已经达成
+            self._run(element.remove_from_dom())           # 直接从 DOM 删除
+            return not self.exists(selector, timeout=1)    # 确认确实消失
+        except Exception:
+            return False
+
+    # --- 刷新当前页面 ---
+    def reload(self, appear=None, text_has=None, timeout=15):
+        try:
+            self._run(self.tab.reload())                   # 让当前标签页重新加载
+            return self.wait(appear=appear, text_has=text_has, timeout=timeout) if (appear or text_has) else True
+        except Exception:
+            return False
+
+    # --- 浏览历史后退 ---
+    def back(self):
+        try:
+            self._run(self.tab.back())                     # 回到上一条浏览历史
+            return True
+        except Exception:
+            return False
+
+    # --- 浏览历史前进 ---
+    def forward(self):
+        try:
+            self._run(self.tab.forward())                  # 前往下一条浏览历史
+            return True
+        except Exception:
+            return False
+
+    # --- 明确等待固定秒数 ---
+    def sleep(self, seconds):
+        time.sleep(max(0, seconds))                        # 负数归零，避免 time.sleep 抛错
+        return self                                        # 返回自身便于 page.sleep(1).click(...) 链式调用
+
+    # --- 等待某个条件达成 ---
+    def wait(self, appear=None, vanish=None, url_has=None, text_has=None, timeout=15, gap=0.5):
+        # 只等待、不执行动作，用于"提交后等结果页出现"这类纯等待场景
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            if self.check(appear, vanish, url_has, text_has):
                 return True
-            time.sleep(0.2)
+            time.sleep(gap)
+
+        return False
+
+    # ==================== 标签页管理 ====================
+
+    # --- 把有头 Chrome 恢复到前台（只在需要真人操作时调用） ---
+    def front(self):
+        if self.headless or sys.platform != "win32" or not self.driver:
+            return False
+        try:
+            import ctypes                                   # 标准库直接调用 Windows 窗口 API，不新增依赖
+            import winsound                                 # 后台流程抵达真人步骤时给用户明确提示
+            from ctypes import wintypes
+
+            process = getattr(self.driver, "_process", None)
+            pid = process.pid if process else 0
+            windows = []
+
+            @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            def find_window(hwnd, _):
+                owner = wintypes.DWORD()
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                if owner.value == pid and ctypes.windll.user32.IsWindowVisible(hwnd):
+                    windows.append(hwnd)
+                    return False                            # 找到主 Chrome 窗口即可停止枚举
+                return True
+
+            ctypes.windll.user32.EnumWindows(find_window, 0)
+            if not windows:
+                return False
+            hwnd = windows[0]
+            ctypes.windll.user32.ShowWindow(hwnd, 9)        # SW_RESTORE：从最小化状态恢复
+            ctypes.windll.user32.BringWindowToTop(hwnd)
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            winsound.MessageBeep()                          # 即使系统拒绝抢焦点，仍能提醒用户切换窗口
+            return True
+        except Exception:
+            return False                                    # 前台提醒失败不能影响自动注册主流程
+
+    # --- 切换到另一个标签页（OAuth 弹窗、新窗口等场景） ---
+    def switch(self, index=-1, url_has=None):
+        # index：切到第几个标签页，-1 表示最新一个（通常是刚弹出来的）
+        # url_has：只切到网址包含该文字的标签页
+        try:
+            self._run(self.driver.update_targets())         # 刷新标签页列表，确保刚弹出的也能看到
+            all_tabs = self.driver.tabs                     # 所有打开的标签页
+
+            if url_has:                                     # 按网址关键词找目标标签页
+                for tab in all_tabs:
+                    tab_url = tab.target.url if hasattr(tab, "target") else ""
+                    if url_has in tab_url:
+                        self.tab = tab
+                        self._run(self.tab.activate())      # 激活目标标签页
+                        return True
+                return False                                # 没找到含该关键词的标签页
+
+            if abs(index) <= len(all_tabs):                 # 按序号切换
+                self.tab = all_tabs[index]
+                self._run(self.tab.activate())
+                return True
+            return False
+        except Exception:
+            return False
+
+    # --- 列出所有标签页的网址 ---
+    def tabs(self):
+        try:
+            self._run(self.driver.update_targets())
+            return [t.target.url for t in self.driver.tabs if hasattr(t, "target")]
+        except Exception:
+            return []
+
+    # ==================== 读取层 ====================
+
+    # --- 取当前网址 ---
+    def url(self):
+        try:
+            return self._run(self.tab.evaluate("document.URL")) or ""
+        except Exception:
+            return ""
+
+    # --- 取元素文字，不传选择器则取整页文字 ---
+    def text(self, selector=None):
+        try:
+            if selector is None:
+                return self._run(self.tab.evaluate("document.body.innerText")) or ""
+            element = self.locate(selector)
+            return element.text if element else ""
+        except Exception:
+            return ""
+
+    # --- 取元素或整页 HTML 源码 ---
+    def html(self, selector=None):
+        try:
+            if selector is None:
+                return self._run(self.tab.evaluate("document.documentElement.outerHTML")) or ""
+            element = self.locate(selector)
+            if not element:
+                return ""
+            return self._run(element.get_html()) or ""
+        except Exception:
+            return ""
+
+    # --- 读取输入框当前值（回读校验时的核心） ---
+    def value(self, selector):
+        # selector：目标输入框
+        try:
+            element = self.locate(selector)
+            return self._get_value(element) if element else ""
+        except Exception:
+            return ""
+
+    # --- 内部：从元素对象上取 value 属性 ---
+    def _get_value(self, element):
+        try:
+            # apply 会让 nodriver 用 backend_node_id 定位真实 DOM 元素，再读取实时 value。
+            # 这比读取 attrs 可靠，因为 attrs 往往还是页面初始值，不会随用户输入更新。
+            result = self._run(element.apply("(elem) => elem.value"))
+            return "" if result is None else str(result)
+        except Exception:
+            return ""
+
+    # --- 取某个 cookie 的值 ---
+    def cookie(self, name):
+        try:
+            cookies = self._run(self.driver.cookies.get_all())
+            for item in cookies:
+                if item.name == name:
+                    return item.value
+            return ""
+        except Exception:
+            return ""
+
+    # --- 取全部 cookie 为字典 ---
+    def cookies(self):
+        try:
+            items = self._run(self.driver.cookies.get_all())
+            return {item.name: item.value for item in items}
+        except Exception:
+            return {}
+
+    # --- 截图保存到文件 ---
+    def shot(self, path="shot.png"):
+        try:
+            self._run(self.tab.save_screenshot(path))
+            return path
+        except Exception:
+            return ""
+
+    # --- 执行一段 JS 并返回结果 ---
+    def run_js(self, script):
+        try:
+            return self._run(self.tab.evaluate(script))
+        except Exception:
+            return None
+
+    # --- 支持 with 语法：进入返回自身 ---
+    def __enter__(self):
+        return self
+
+    # --- 支持 with 语法：退出时自动关闭浏览器 ---
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
         return False

@@ -1,218 +1,106 @@
-import logging                                                                         # Python 内置日志库用于输出分级日志
-import sys                                                                             # sys 用于判断当前输出流是否为终端以及绑定 stdout
-from typing import Optional                                                            # 类型提示工具用于增强代码可读性
-
 """
-# 基础用法：控制台彩色日志
-log = Log(name="MyApp")
-log.debug("这是调试信息")      # 亮青色
-log.info("这是普通信息")       # 亮绿色
-log.warning("这是警告信息")    # 亮黄色
-log.error("这是错误信息")      # 亮红色
-log.critical("这是致命错误")   # 亮洋红
+日志工具：统一输出清楚、带时间和颜色的运行信息，不让每个脚本重复配置 logging/Rich。
 
-# 异常捕获：自动打印堆栈
-log = Log(name="MyApp")
-try:
-    1 / 0
-except Exception:
-    log.exception("捕获到异常")  # 自动打印堆栈跟踪
+设计思想：
+注册机和逆向代理都需要看运行进度。底层使用标准 logging 保存生态兼容性，终端输出交给
+RichHandler 负责颜色、异常堆栈和 Windows 兼容。调用方只创建一次 Log，之后直接使用
+debug/info/warning/error/exception；需要落盘时调用 file。
 
-# 同时输出到文件
-log = Log(name="MyApp")
-# 添加文件处理器，只记录 WARNING 及以上级别
-log.addFileHandler("app.log", level=logging.WARNING)
+怎么调用：
+    from lazyfox import Log
 
-log.info("这条只会在控制台显示")
-log.error("这条会同时显示在控制台和文件中")
+    log = Log("grok")
+    log.info("开始注册")
+    try:
+        run()
+    except Exception:
+        log.exception("注册失败")
 
-# 动态调整日志级别
-log = Log(name="MyApp")
-log.setLevel(logging.WARNING)  # 动态提升日志级别
-log.debug("这条会被过滤掉")
-log.warning("这条会显示")
+    log.file("logs/grok.log")               # 后续同时写入文件
 """
+
+import logging                                              # 标准日志核心，负责级别、处理器和第三方兼容
+from pathlib import Path                                   # 创建日志文件父目录
+
+from rich.logging import RichHandler                       # Rich 彩色终端处理器，负责美化和异常堆栈
 
 
 class Log:
-    """通用日志模块"""
+    """彩色日志入口，方法名和标准 logging 保持一致。"""
 
-    def __init__(self, name: str = "app", level: int = logging.DEBUG, resetHandlers: bool = False):
-        self.name = name                                                               # 当前日志器名称，便于多模块隔离日志
-        self.level = level                                                             # 当前日志等级，决定哪些日志会被输出
-        self.logger = logging.getLogger(name)                                          # 获取或创建同名 logger 实例
-        self.logger.setLevel(level)                                                    # 设置 logger 的最低处理级别
-        self.logger.propagate = False                                                  # 关闭向父 logger 传播，避免重复打印
+    # --- 建立一个不会重复输出的日志器 ---
+    def __init__(self, name="app", level=logging.INFO, reset=False):
+        # name：日志来源名称，同名实例会复用同一个底层 logger
+        # level：最低输出级别，默认 INFO
+        # reset：是否清掉同名 logger 的旧处理器，测试或重新配置时使用
+        self.name = name                                    # 保存名称，文件日志格式会展示
+        self.level = level                                  # 保存当前级别，新增文件处理器时沿用
+        self.log = logging.getLogger(name)                  # 获取标准 logger，方便第三方库接入
+        self.log.setLevel(level)                            # 设置 logger 总级别
+        self.log.propagate = False                          # 禁止向根 logger 传播，避免同一条打印两次
 
-        if resetHandlers: self.logger.handlers.clear()                                 # 显式要求重置时清空已有处理器
-        if not self.logger.handlers:                                                   # 只有在没有处理器时才初始化默认输出
-            consoleHandler = self._buildConsoleHandler(level)                          # 创建控制台处理器
-            self.logger.addHandler(consoleHandler)                                     # 把控制台处理器挂到当前 logger 上
+        if reset:
+            self.log.handlers.clear()                      # 调用方明确要求时移除旧输出通道
+        if not self.log.handlers:
+            self.log.addHandler(self._console(level))      # 第一次创建该名称时装上彩色终端输出
 
-    # ==================== 配置层 ====================
+    # --- 构造彩色终端输出 ---
+    def _console(self, level):
+        handler = RichHandler(                             # Rich 负责颜色、时间和异常堆栈排版
+            level=level,
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            rich_tracebacks=True,
+            markup=False,
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))  # Rich 已展示时间/级别，只保留正文
+        return handler
 
-    def _buildConsoleHandler(self, level: int):                                        # 创建一个输出到控制台的处理器
-        handler = logging.StreamHandler(sys.stdout)                                    # 把日志输出到标准输出而不是标准错误
-        handler.setLevel(level)                                                        # 设置该处理器自己的日志等级
-        handler.setFormatter(self._buildFormatter(useColor=sys.stdout.isatty()))       # 终端环境下启用颜色，重定向时自动关闭颜色
-        return handler                                                                 # 返回处理器供外部挂载
+    # --- 增加纯文本文件输出 ---
+    def file(self, path, level=None):
+        # path：日志文件路径，父目录不存在时自动创建
+        # level：该文件最低级别，不传就沿用 Log 当前级别
+        file_path = Path(path)                             # 统一转 Path 方便创建目录
+        file_path.parent.mkdir(parents=True, exist_ok=True)  # 确保 logs/ 之类目录存在
+        handler = logging.FileHandler(file_path, encoding="utf-8")  # UTF-8 写文件，不含终端颜色码
+        handler.setLevel(self.level if level is None else level)  # 文件可单独设置更高门槛
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        self.log.addHandler(handler)                       # 加到当前 logger，后续日志同时输出终端和文件
+        return self                                        # 返回自身，支持 Log(...).file(...) 链式写法
 
-    def _buildFileHandler(self, filename: str, level: Optional[int] = None, encoding: str = "utf-8"):  # 创建一个输出到文件的处理器
-        handler = logging.FileHandler(filename, encoding=encoding)                     # 创建文件处理器用于写入日志文件
-        handler.setLevel(self.level if level is None else level)                       # 未指定等级时沿用当前 logger 等级
-        handler.setFormatter(self._buildFormatter(useColor=False))                     # 文件中通常不需要 ANSI 颜色码
-        return handler                                                                 # 返回文件处理器
+    # --- 修改所有输出通道的最低级别 ---
+    def set_level(self, level):
+        self.level = level                                 # 更新实例记录
+        self.log.setLevel(level)                           # 更新 logger 总级别
+        for handler in self.log.handlers:
+            handler.setLevel(level)                       # 已安装的终端/文件处理器同步更新
+        return self
 
-    def _buildFormatter(self, useColor: bool = True):                                  # 构造一个自定义格式化器
-        outer = self                                                                   # 保存外层 self，供内部格式化器访问颜色映射
+    # --- DEBUG 调试信息 ---
+    def debug(self, message, *args, **kwargs):
+        self.log.debug(message, *args, **kwargs)           # 转交标准 logger，保留格式化参数能力
 
-        class _Formatter(logging.Formatter):                                           # 局部格式化器类，仅在当前方法内使用
-            def format(self, record: logging.LogRecord) -> str:                        # 自定义日志记录格式化逻辑
-                color = outer._getLevelColor(record.levelno)                           # 根据日志级别选取颜色
-                tag = outer._getLevelTag(record.levelno)                               # 根据日志级别选取短标签
-                message = record.getMessage()                                          # 取出真正的日志文本内容
+    # --- INFO 正常进度 ---
+    def info(self, message, *args, **kwargs):
+        self.log.info(message, *args, **kwargs)            # 输出正常业务进度
 
-                base = f"[{tag}] {message}"                                            # 构造基础日志文本格式
-                if useColor and color:                                                 # 需要颜色且当前级别有颜色映射时
-                    base = f"{color}{base}{outer.RESET}"                               # 在首尾包上 ANSI 颜色控制码
+    # --- WARNING 可继续的异常情况 ---
+    def warning(self, message, *args, **kwargs):
+        self.log.warning(message, *args, **kwargs)         # 输出警告但不终止流程
 
-                if record.exc_info:                                                    # 如果当前日志带有异常堆栈信息
-                    excText = self.formatException(record.exc_info)                    # 用 logging 内置方式格式化异常
-                    if useColor and color:                                             # 终端彩色模式下
-                        base += f"\n{color}{excText}{outer.RESET}"                     # 给异常堆栈也套同色显示
-                    else:
-                        base += f"\n{excText}"                                         # 非彩色模式直接拼接纯文本异常
+    # --- ERROR 已失败的动作 ---
+    def error(self, message, *args, **kwargs):
+        self.log.error(message, *args, **kwargs)           # 输出错误信息
 
-                if record.stack_info:                                                  # 如果显式附带了 stack_info 调用栈信息
-                    if useColor and color:                                             # 彩色模式下
-                        base += f"\n{color}{record.stack_info}{outer.RESET}"           # 给 stack 信息也使用同级别颜色
-                    else:
-                        base += f"\n{record.stack_info}"                               # 非彩色模式直接拼接调用栈文本
+    # --- CRITICAL 系统级严重错误 ---
+    def critical(self, message, *args, **kwargs):
+        self.log.critical(message, *args, **kwargs)        # 输出最高级别错误
 
-                return base                                                            # 返回最终格式化后的字符串
+    # --- 输出错误并附带当前异常堆栈 ---
+    def exception(self, message, *args, **kwargs):
+        self.log.exception(message, *args, **kwargs)       # 在 except 块里使用，Rich 会格式化完整堆栈
 
-        return _Formatter()                                                            # 返回一个可供 handler 使用的 formatter 实例
-
-    def _getLevelColor(self, levelno: int) -> str:                                     # 根据日志级别返回对应颜色码
-        if levelno >= logging.CRITICAL: return self.CRITICAL                           # CRITICAL 使用亮洋红提高警示感
-        if levelno >= logging.ERROR: return self.ERROR                                 # ERROR 使用亮红色突出错误
-        if levelno >= logging.WARNING: return self.WARNING                             # WARNING 使用亮黄色表示警告
-        if levelno >= logging.INFO: return self.INFO                                   # INFO 使用亮绿色表示正常信息
-        return self.DEBUG                                                              # 其余默认按 DEBUG 使用亮青色
-
-    def _getLevelTag(self, levelno: int) -> str:                                       # 根据日志级别返回更短更易识别的标签
-        if levelno >= logging.CRITICAL: return "FATAL"                                 # 严重错误显示为 FATAL
-        if levelno >= logging.ERROR: return "ERROR"                                    # 错误显示为 ERROR
-        if levelno >= logging.WARNING: return "WARN"                                   # 警告显示为 WARN
-        if levelno >= logging.INFO: return "INFO"                                      # 普通信息显示为 INFO
-        return "DEBUG"                                                                 # 调试信息显示为 DEBUG
-
-    def setLevel(self, level: int):                                                    # 动态修改当前 logger 及全部 handler 的日志等级
-        self.level = level                                                             # 保存新的日志等级到对象状态
-        self.logger.setLevel(level)                                                    # 更新 logger 的最低处理级别
-        for handler in self.logger.handlers:                                           # 遍历当前挂载的所有处理器
-            handler.setLevel(level)                                                    # 同步更新每个处理器的输出级别
-
-    def addFileHandler(self, filename: str, level: Optional[int] = None, encoding: str = "utf-8"):  # 追加文件输出能力
-        handler = self._buildFileHandler(filename, level=level, encoding=encoding)     # 创建文件处理器
-        self.logger.addHandler(handler)                                                # 挂到当前 logger 上
-        return handler                                                                 # 返回处理器方便调用方后续精细控制
-
-    def addConsoleHandler(self, level: Optional[int] = None):                          # 追加一个新的控制台处理器
-        handler = self._buildConsoleHandler(self.level if level is None else level)    # 创建控制台处理器
-        self.logger.addHandler(handler)                                                # 挂到当前 logger 上
-        return handler                                                                 # 返回该处理器供调用方使用
-
-    def clearHandlers(self):                                                           # 清空当前 logger 的全部处理器
-        self.logger.handlers.clear()                                                   # 移除所有输出通道，避免重复打印
-
-    def resetHandlers(self):                                                           # 重置为仅保留一个默认控制台处理器
-        self.clearHandlers()                                                           # 先清空当前全部处理器
-        self.logger.addHandler(self._buildConsoleHandler(self.level))                  # 再挂回一个默认控制台处理器
-
-    def getLogger(self):                                                               # 获取底层原生 logging.Logger 对象
-        return self.logger                                                             # 方便与第三方库或旧代码集成
-
-    # ==================== 输出层 ====================
-
-    def log(self, level: int, message: str, *args, **kwargs):                          # 通用日志输出入口
-        self.logger.log(level, message, *args, **kwargs)                               # 直接调用底层 logger.log
-
-    def debug(self, message: str, *args, **kwargs):                                    # 输出 DEBUG 级别日志
-        self.logger.debug(message, *args, **kwargs)                                    # 调试阶段最常用
-
-    def info(self, message: str, *args, **kwargs):                                     # 输出 INFO 级别日志
-        self.logger.info(message, *args, **kwargs)                                     # 表示正常业务信息
-
-    def warning(self, message: str, *args, **kwargs):                                  # 输出 WARNING 级别日志
-        self.logger.warning(message, *args, **kwargs)                                  # 表示潜在风险但程序仍可继续
-
-    def warn(self, message: str, *args, **kwargs):                                     # 提供 warn 别名以兼容旧习惯
-        self.logger.warning(message, *args, **kwargs)                                  # 内部统一转发到 warning
-
-    def error(self, message: str, *args, **kwargs):                                    # 输出 ERROR 级别日志
-        self.logger.error(message, *args, **kwargs)                                    # 表示当前操作已经失败
-
-    def critical(self, message: str, *args, **kwargs):                                 # 输出 CRITICAL 级别日志
-        self.logger.critical(message, *args, **kwargs)                                 # 表示严重错误或系统级故障
-
-    def fatal(self, message: str, *args, **kwargs):                                    # 提供 fatal 别名增强语义表达
-        self.logger.critical(message, *args, **kwargs)                                 # fatal 本质上等价于 critical
-
-    def exception(self, message: str, *args, **kwargs):                                # 输出带异常堆栈的 ERROR 日志
-        self.logger.exception(message, *args, **kwargs)                                # 只能在 except 块中使用最有价值
-
-    # ==================== 常量区 ====================
-
-    RESET = "\033[0m"                                                                  # ANSI 重置颜色控制码
-    DEBUG = "\033[96m"                                                                 # DEBUG 使用亮青色
-    INFO = "\033[92m"                                                                  # INFO 使用亮绿色
-    WARNING = "\033[93m"                                                               # WARNING 使用亮黄色
-    ERROR = "\033[91m"                                                                 # ERROR 使用亮红色
-    CRITICAL = "\033[95m"                                                              # CRITICAL 使用亮洋红色
-    
-    
-    
-# ==================== 测试入口 ====================
-
-if __name__ == "__main__":
-    # 1. 初始化日志器
-    # 默认输出到控制台，DEBUG 级别
-    log = Log(name="TestApp", level=logging.DEBUG)
-    
-    print("--- 开始测试控制台彩色输出 ---")
-    
-    # 2. 测试各级别日志输出
-    log.debug("这是一条 DEBUG 信息 (亮青色)")
-    log.info("这是一条 INFO 信息 (亮绿色)")
-    log.warning("这是一条 WARNING 信息 (亮黄色)")
-    log.error("这是一条 ERROR 信息 (亮红色)")
-    log.critical("这是一条 CRITICAL 信息 (亮洋红)")
-    log.fatal("这是一条 FATAL 信息 (别名，同 CRITICAL)")
-
-    # 3. 测试异常堆栈打印
-    print("\n--- 测试异常堆栈打印 ---")
-    try:
-        result = 10 / 0
-    except ZeroDivisionError:
-        log.exception("捕获到除零异常")
-    
-    # 4. 测试文件输出 (文件中不应有颜色码)
-    print("\n--- 测试文件输出 (查看当前目录下的 test.log) ---")
-    # 添加一个文件处理器，只记录 WARNING 及以上级别
-    log.addFileHandler("test.log", level=logging.WARNING)
-    
-    log.info("这条信息只会出现在控制台，不会写入文件 (级别不够)")
-    log.error("这条错误会同时出现在控制台和文件中")
-    
-    # 5. 测试动态修改日志级别
-    print("\n--- 测试动态修改日志级别 ---")
-    print(f"当前日志级别: {logging.getLevelName(log.level)}")
-    
-    log.setLevel(logging.WARNING)
-    print("已将日志级别设置为 WARNING")
-    
-    log.debug("这条 DEBUG 信息将不会显示 (被过滤)")
-    log.warning("这条 WARNING 信息会显示")
-    
-    print("\n--- 测试结束 ---")
+    # --- 交出底层标准 logger 给第三方库 ---
+    def raw(self):
+        return self.log                                    # 某些框架只接受 logging.Logger，直接传这个结果
