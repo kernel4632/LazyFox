@@ -3,7 +3,7 @@ import re                                                                       
 import time                                                                            # 时间库用于轮询等待和超时控制
 from urllib.parse import unquote                                                       # URL 解码工具用于处理令牌中的转义字符
 
-""" 
+"""
 # 拿验证码
 with TempMail() as mail:
     print(mail.generateEmail())
@@ -168,8 +168,8 @@ class TempMail:
 
     def __enter__(self): return self                                                   # 进入 with 语句时返回自身
     def __exit__(self, *args): self.close()                                            # 退出 with 语句时自动关闭
-    
-    
+
+
 if __name__ == "__main__":
     with TempMail() as mail:
         print(mail.generateEmail())
