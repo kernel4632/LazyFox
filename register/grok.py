@@ -141,10 +141,11 @@ def reject_email(page):
     return False
 
 
-# --- 完成注册后先在原页面确认结果 ---
-def wait_registration(page, timeout):
+# --- 提交注册并在原页面确认结果 ---
+def submit_registration(page, timeout, retry_gap=3):
     deadline = time.monotonic() + timeout
     account_ready = False                                  # 成功页面出现后仍留在原处等待 Cookie
+    next_click = 0                                          # 慢页面吞掉点击时按固定间隔补点，不连续提交
     while time.monotonic() < deadline:
         token = page.cookie("sso")
         if token:
@@ -156,6 +157,10 @@ def wait_registration(page, timeout):
                 account_ready = True
                 names = ", ".join(sorted(page.cookies())) or "无"
                 log.info(f"已进入账户中心，当前 Cookie 名称：{names}")
+        now = time.monotonic()
+        if not account_ready and now >= next_click and page.visible(SELECTORS["submit"], timeout=1):
+            page.click(SELECTORS["submit"], tries=1)        # 按钮仍在原页才补点，离开表单后不会重复注册
+            next_click = now + retry_gap
         page.sleep(0.5)
     if account_ready:
         raise RuntimeError("账户已创建，但账户页面未读到 sso Cookie")
@@ -183,6 +188,26 @@ def wait_challenge(page, timeout):
             return True
         page.sleep(0.5)                                     # 有限频率检查，不占满 CPU
     return False
+
+
+# --- 点击页面步骤，并在点击被慢页面吞掉时有限重试 ---
+def click_step(page, button, appear, timeout, retry_gap=3, check=None):
+    deadline = time.monotonic() + timeout                  # 整个步骤共享一个超时，不让多次点击无限延长
+    while time.monotonic() < deadline:
+        if check:
+            check(page)                                     # 邮箱步骤可在重试间隙立即识别拒绝提示
+        if page.visible(appear, timeout=1):                 # 目标已经出现，恢复流程时不重复点击
+            return True
+
+        if page.visible(button, timeout=1):                 # 原按钮仍可见，说明页面尚未完成切换
+            page.click(button, tries=1)                     # 每轮只点一次，结果由下一段等待确认
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if page.wait(appear=appear, timeout=min(retry_gap, remaining), gap=0.5):
+            return True                                    # 慢网络最终完成切换后立即停止重试
+    return False                                           # 原按钮多次无响应或目标页面始终未加载
 
 
 # --- 执行一个完整注册流程 ---
@@ -219,20 +244,19 @@ def register_once(settings, browser_type=Browser, mail_type=Mail, person_type=Pe
             reject_blocked(page)                           # 先确认网络可访问，避免封禁节点白白申请临时邮箱
             need(ready, "注册页没有出现邮箱注册入口")
 
-            opened = page.click(
-                SELECTORS["email_option"], appear=SELECTORS["email"], tries=10, gap=1
+            opened = click_step(
+                page, SELECTORS["email_option"], SELECTORS["email"], settings.page_timeout
             )
             need(opened, "邮箱注册表单没有出现")
 
             with mail_type(channel=channel, proxy=settings.proxy, timeout=20) as mail:
                 email = make_email(mail)                    # 页面确认可注册后才申请真实邮箱
                 need(page.fill(SELECTORS["email"], email, verify=True), "邮箱填写失败")
-                submitted = page.click(
-                    SELECTORS["email_submit"], appear=SELECTORS["code"],
-                    tries=5, gap=1, repeat=False,
+                submitted = click_step(
+                    page, SELECTORS["email_submit"], SELECTORS["code"], settings.page_timeout,
+                    check=reject_email,
                 )
-                # 点击后仍同时检查拒绝文案；后置条件不能只依赖按钮调用是否返回。
-                need(submitted or wait_code_page(page, settings.page_timeout), "等待验证码输入框超时")
+                need(submitted, "等待验证码输入框超时")
 
                 code = mail.wait_code(timeout=settings.mail_timeout, interval=3)
                 if not code:
@@ -245,8 +269,8 @@ def register_once(settings, browser_type=Browser, mail_type=Mail, person_type=Pe
                     appear=SELECTORS["first"], tries=10, gap=1, repeat=False,
                 )
                 # 当前页面输入完整 OTP 后自动前进；旧版页面若仍需按钮，则用提交按钮兜底。
-                verified = advanced or page.click(
-                    SELECTORS["code_submit"], appear=SELECTORS["first"], tries=10, gap=1
+                verified = advanced or click_step(
+                    page, SELECTORS["code_submit"], SELECTORS["first"], settings.page_timeout,
                 )
                 need(verified, "验证码提交后没有进入资料页面")
 
@@ -259,11 +283,9 @@ def register_once(settings, browser_type=Browser, mail_type=Mail, person_type=Pe
                 log.info(f"注册姓名：{person['name']}")
                 need(wait_challenge(page, settings.challenge_timeout), "等待真人验证超时")
 
-                # 提交按钮默认只真正点击一次，随后由 wait_sso 观察最终 Cookie，避免重复注册。
-                need(page.click(SELECTORS["submit"]), "注册提交按钮点击失败")
                 page.press("css=body", "Escape")           # 尝试收起可能出现的密码保存浮层
                 page.run_js("document.body?.click()")      # 让页面重新获得焦点，方便 Cookie 写入完成
-                token = wait_registration(page, settings.page_timeout)
+                token = submit_registration(page, settings.page_timeout)
                 need(token, "注册完成后没有找到 sso Cookie")
         except Exception:
             shot = failure_path()                          # 每次失败使用独立截图名，便于排查选择器变化
