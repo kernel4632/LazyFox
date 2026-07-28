@@ -30,6 +30,7 @@ exports = {
     "StoreError": ("tools.store", "StoreError"),
     "Table": ("tools.store", "Table"),
     "Turnstile": ("tools.turnstile", "Turnstile"),
+    "Verification": ("tools.turnstile", "Verification"),
     "find_code": ("tools.code", "find_code"),
     "find_link": ("tools.code", "find_link"),
     "first_form": ("tools.form", "first_form"),
@@ -44,6 +45,7 @@ exports = {
     "turnstile_attach": ("tools.turnstile", "attach"),
     "turnstile_audit": ("tools.turnstile", "audit"),
     "turnstile_dummy": ("tools.turnstile", "dummy"),
+    "turnstile_verify": ("tools.turnstile", "verify"),
     "turnstile": ("tools.form", "turnstile"),
 }
 

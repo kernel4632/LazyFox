@@ -36,7 +36,7 @@ from lazyfox import Browser, Mail, Person, Proxy, HTTP, AsyncHTTP, Log, Lines, T
 | `HTTP` / `AsyncHTTP` | 上游请求 | 会话复用、代理、重试、401/403 自动重新登录 |
 | `first_form` / `turnstile` / `result` | HTML 表单分析 | 提取 action、字段约束、Turnstile 配置和结果页摘要 |
 | `run_probes` / `form_cases` | 协议探针 | 批量提交字段变体并按响应语义聚类 |
-| `turnstile_audit` | Turnstile 审计 | 识别官方测试 key、dummy token 适用性和生产配置 |
+| `turnstile_audit` / `turnstile_verify` | Turnstile 协议 | 识别测试 key、构造提交体、调用 siteverify 解析结果 |
 | `parse` / `parse_async` | SSE 解析 | 同步和异步事件流统一解析 |
 | `Proxy` | OpenAI 代理骨架 | 自动提供 Chat Completions 和 Responses API |
 | `find_code` / `find_link` | 邮件提取 | 纯文本、HTML、分段码和链接转义 |
@@ -249,7 +249,7 @@ print(result(response.text).summary())                   # 提取 title/状态�
 ### 协议探针和 Turnstile 审计
 
 ```python
-from lazyfox import HTTP, first_form, form_cases, groups, run_probes, turnstile_audit, turnstile_dummy
+from lazyfox import HTTP, first_form, form_cases, groups, run_probes, turnstile_audit, turnstile_dummy, turnstile_verify
 
 web = HTTP(base="https://example.com")
 html = web.get("/").text
@@ -271,10 +271,17 @@ cases.append(cases[0].__class__(
 findings = run_probes(web, cases)
 for bucket in groups(findings):
     print([item.case for item in bucket], "=>", bucket[0].summary())
+
+check = turnstile_verify(
+    "XXXX.DUMMY.TOKEN.XXXX",
+    "1x0000000000000000000000000000000AA",                # Cloudflare 官方测试 secret
+)
+print(check.success, check.errors, check.hostname)
 ```
 
-`turnstile_audit` 只识别配置和测试 key，不生成真实 Cloudflare token。生产 Turnstile token
-必须由 Cloudflare 正常签发并由服务端 `siteverify` 校验。
+`turnstile_audit` 只识别配置和测试 key；`turnstile_verify` 只调用 Cloudflare 官方 `siteverify`。
+二者都不生成真实 Cloudflare token。生产 Turnstile token 必须由 Cloudflare 正常签发并由服务端
+`siteverify` 校验。
 
 ## 保存可靠性
 
