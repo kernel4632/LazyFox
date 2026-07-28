@@ -56,11 +56,10 @@ class HTTP:
         return f"{self.base}/{str(path).lstrip('/')}"       # 相对路径和根地址各保留一个斜杠
 
     # --- 发请求，失败重试，鉴权失效自动登录 ---
-    def request(self, method, path, auth=True, replay_safe=None, check=True, **kwargs):
+    def request(self, method, path, auth=True, replay_safe=None, **kwargs):
         # method / path：请求方法和地址
         # auth：是否允许在 401/403 时自动执行 login；登录请求自身应传 False 防止递归
         # replay_safe：是否允许失败后重发；默认只重试 GET/HEAD/OPTIONS，POST 必须明确传 True
-        # check：是否把 4xx/5xx 当异常；逆向分析失败页时传 False 保留响应正文
         method = method.upper()                             # 统一方法名，便于判断是否天然幂等
         if replay_safe is None:
             replay_safe = method in ("GET", "HEAD", "OPTIONS")  # 读取请求默认可安全重放
@@ -75,8 +74,7 @@ class HTTP:
                     did_login = True                       # 先标记，login 内部若请求失败也不会递归刷新
                     self.login(self)                       # 让业务提供的登录动作刷新 Cookie 或请求头
                     continue                              # 登录成功后重新发送原请求
-                if check:
-                    response.raise_for_status()            # 默认严格模式：4xx/5xx 转成明确异常
+                response.raise_for_status()                # 4xx/5xx 转成明确异常，进入重试或最终抛出
                 return response                            # 请求成功，立即返回 httpx.Response
             except (httpx.HTTPError, OSError) as error:
                 last_error = error                         # 记住失败原因，供最后一次尝试后抛出
@@ -172,7 +170,7 @@ class AsyncHTTP:
         return f"{self.base}/{str(path).lstrip('/')}"       # 相对路径拼到根地址后
 
     # --- 异步发请求，失败重试，鉴权失效自动登录 ---
-    async def request(self, method, path, auth=True, replay_safe=None, check=True, **kwargs):
+    async def request(self, method, path, auth=True, replay_safe=None, **kwargs):
         method = method.upper()                             # 统一请求方法
         if replay_safe is None:
             replay_safe = method in ("GET", "HEAD", "OPTIONS")  # 异步版遵循同一重放规则
@@ -187,8 +185,7 @@ class AsyncHTTP:
                     did_login = True                       # 防止登录函数自身触发无限刷新
                     await self.login(self)                 # 调用业务提供的异步登录动作
                     continue                              # 用新登录态重发原请求
-                if check:
-                    response.raise_for_status()            # 默认严格模式：把错误状态转成异常
+                response.raise_for_status()                # 把错误状态转成异常
                 return response                            # 成功返回响应
             except (httpx.HTTPError, OSError) as error:
                 last_error = error                         # 保存本次失败

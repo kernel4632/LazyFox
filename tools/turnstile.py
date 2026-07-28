@@ -1,131 +1,96 @@
 """
-Cloudflare Turnstile 审计工具：识别测试配置、token 字段和服务端验证边界。
+Turnstile 验证工具：用最小化浏览器获取 Cloudflare Turnstile token，再用纯 HTTP siteverify 校验。
 
 设计思想：
-Turnstile 的安全边界在 Cloudflare 的 siteverify，不在前端 widget。LazyFox 不应该伪造或绕过
-验证码，但应该能快速判断一个目标是否误用了官方测试 key、是否接受 dummy token、以及表单应携带
-哪个字段。这个文件只做配置识别和提交辅助，不做 token 生成。
+Cloudflare Turnstile 的 token 生成在 iframe 内部完成（PoW + 指纹 + 挑战），纯 HTTP 无法伪造。
+但"获取 token"和"使用 token"可以分离：用浏览器打开目标站页面，等待页面上已有的 Turnstile
+widget 自动完成挑战，通过 turnstile.getResponse() 提取 token，然后把 token 交给纯 HTTP 流程
+提交表单。浏览器只负责拿 token，其余全由 HTTP 驱动。
+
+两种获取模式：
+1. inline — 直接打开目标站，用页面上已有的 Turnstile widget 获取 token（推荐，origin 匹配）
+2. injected — 打开目标站后注入新的 widget（页面没有内置 widget 时用）
+
+里面有什么：
+- solve_turnstile(sitekey, url)              获取 Turnstile token
+- verify_turnstile(secret, token)            纯 HTTP 校验 token
+- TurnstileSolver 类                          封装上述两步，适合多次调用
+
+怎么调用：
+    from lazyfox import solve_turnstile, verify_turnstile
+
+    token = solve_turnstile("0x4AAAAAADw2q5H9gJ3lugym", "https://ctf.r1qwq.top")
+    if token:
+        # 纯 HTTP 提交表单，token 由浏览器获取，提交不经过浏览器
+        web.post("/submit", data={"cf-turnstile-response": token, ...})
 """
 
-from dataclasses import dataclass, field                    # 审计和验证结果都用结构化数据返回
+import time                                                 # 轮询 token 回写
 
-from tools.form import turnstile                            # 静态 widget 配置由表单解析层负责
-from tools.http import HTTP                                 # siteverify 是标准 HTTP 表单接口
-
-
-DUMMY_TOKEN = "XXXX.DUMMY.TOKEN.XXXX"                       # Cloudflare 官方测试 sitekey 生成的 dummy token
-TOKEN_FIELD = "cf-turnstile-response"                       # 官方自动渲染表单写入的字段名
-SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-
-TEST_SITEKEYS = {
-    "1x00000000000000000000AA": "always-pass-visible",
-    "2x00000000000000000000AB": "always-fail-visible",
-    "1x00000000000000000000BB": "always-pass-invisible",
-    "2x00000000000000000000BB": "always-fail-invisible",
-    "3x00000000000000000000FF": "force-interactive-visible",
-}
+from lazyfox import Browser, HTTP                          # 浏览器拿 token，HTTP 校验 token
 
 
-@dataclass
-class Turnstile:
-    """一个页面中的 Turnstile 静态配置。"""
-
-    sitekey: str = ""                                      # 公开 sitekey，来自 data-sitekey
-    theme: str = ""                                        # widget 主题，可为空
-    action: str = ""                                       # 可选 action，服务端可能校验
-    cdata: str = ""                                        # 可选 cdata，服务端可能校验
-    mode: str = "production"                               # production / test / missing
-    behavior: str = ""                                     # 测试 key 的官方行为说明
-
-    # --- 是否官方测试配置 ---
-    def testing(self):
-        return self.mode == "test"
-
-    # --- 是否可用官方 dummy token 做合法测试提交 ---
-    def dummy_allowed(self):
-        return self.behavior.startswith("always-pass")      # 仍要求服务端也使用对应测试 secret
+# Cloudflare Turnstile 的公开测试 sitekey 和 secret key，用于离线验证 solver 是否正常工作
+TEST_SITEKEY = "1x00000000000000000000AA"                   # 永远通过的测试 sitekey
+TEST_SECRET = "1x0000000000000000000000000000000AA"          # 永远通过的测试 secret key
+CHALLENGE_API = "https://challenges.cloudflare.com/turnstile/v0/api.js"  # Turnstile 官方 JS
+SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"  # 服务端校验端点
 
 
-@dataclass
-class Verification:
-    """Cloudflare siteverify 的结构化结果。"""
+# --- 用浏览器获取 Turnstile token ---
+def solve_turnstile(sitekey, url, proxy=None, timeout=60, headless=False):
+    # sitekey：目标站点的 Turnstile sitekey，从 scan_challenge 或页面 data-sitekey 获取
+    # url：目标页面地址，浏览器会打开它并利用其 origin 让 Turnstile 正确签发 token
+    # proxy：可选代理
+    # timeout：最长等待 token 生成秒数
+    # headless：是否无头运行；managed 模式通常需要交互，建议有头
+    with Browser(headless=headless, proxy=proxy) as page:
+        page.open(url)                                       # 打开目标站，Turnstile 在正确 origin 下运行
+        time.sleep(3)                                        # 等 api.js 加载并渲染 widget
 
-    success: bool = False                                   # Cloudflare 是否接受该 token
-    errors: list[str] = field(default_factory=list)          # error-codes，失败原因直接来自 Cloudflare
-    hostname: str = ""                                      # token 签发所在域名
-    action: str = ""                                        # widget action，服务端可按需校验
-    cdata: str = ""                                         # widget cdata，服务端可按需校验
-    challenge_ts: str = ""                                  # token 签发时间，ISO 字符串
-    raw: dict = field(default_factory=dict)                  # 原始 JSON，保留 Cloudflare 新增字段
-
-    # --- 一行摘要，方便日志输出 ---
-    def summary(self):
-        if self.success:
-            return f"success host={self.hostname} action={self.action}"
-        return "failed " + ",".join(self.errors or ["unknown-error"])
-
-
-# --- 从 HTML 中审计 Turnstile 配置 ---
-def audit(html):
-    config = turnstile(html)
-    sitekey = config.get("sitekey", "")
-    if not sitekey:
-        return Turnstile(mode="missing")                   # 页面没有 widget，调用方可走普通表单逻辑
-    behavior = TEST_SITEKEYS.get(sitekey, "")
-    mode = "test" if behavior else "production"
-    return Turnstile(
-        sitekey=sitekey,
-        theme=config.get("theme", ""),
-        action=config.get("action", ""),
-        cdata=config.get("cdata", ""),
-        mode=mode,
-        behavior=behavior,
-    )
+        deadline = time.monotonic() + timeout               # 整个等待过程共用一个截止时间
+        while time.monotonic() < deadline:
+            # 优先用页面上已有的 widget 获取 token（managed 模式会自动完成）
+            token = page.run_js("turnstile.getResponse() || ''")
+            if token:                                        # managed widget 自动完成挑战后返回 token
+                return token
+            time.sleep(0.5)                                 # 有限频率检查，不占满 CPU
+    return ""                                                # 超时未获取到 token
 
 
-# --- 把 token 写入表单数据 ---
-def attach(data, token, field=TOKEN_FIELD):
-    payload = dict(data or {})                              # 复制输入，避免修改调用方原始字典
-    payload[field] = token                                  # 官方字段名默认使用 cf-turnstile-response
-    return payload
-
-
-# --- 给测试配置生成 dummy token 提交体 ---
-def dummy(data, field=TOKEN_FIELD):
-    return attach(data, DUMMY_TOKEN, field=field)           # 只用于官方测试 key/secret 组合
-
-
-# --- 调用 Cloudflare siteverify 验证 token ---
-def verify(token, secret, remoteip=None, idempotency_key=None, web=None):
-    # token：客户端提交的 Turnstile token；本函数只验证，不生成 token
-    # secret：Cloudflare dashboard 或官方测试 secret；不要写入日志或公开文件
-    # remoteip：可选用户 IP；传入后 Cloudflare 会把它纳入验证上下文
-    owned = web is None                                     # 外部没传 HTTP 会话时，本函数自己创建并关闭
-    web = web or HTTP(timeout=15, tries=2)                  # siteverify 是外部网络接口，保留短重试
-
-    data = {"secret": secret, "response": token}          # Cloudflare 规定的必填字段
+# --- 纯 HTTP 调用 Cloudflare siteverify 校验 token ---
+def verify_turnstile(secret, token, remoteip=None):
+    # secret：服务端 Turnstile secret key（不是 sitekey）
+    # token：从 solve_turnstile 获取的 cf-turnstile-response
+    # remoteip：可选，提交者 IP
+    # 返回：siteverify 响应字典，含 success/error-codes/challenge_ts/hostname
+    data = {"secret": secret, "response": token}            # siteverify 表单字段
     if remoteip:
-        data["remoteip"] = remoteip
-    if idempotency_key:
-        data["idempotency_key"] = idempotency_key
+        data["remoteip"] = remoteip                          # 可选的来源 IP
 
-    try:
-        response = web.post(SITEVERIFY_URL, data=data, check=False, replay_safe=True)
-        payload = response.json() if response.text else {}  # Cloudflare 正常返回 JSON，空响应按失败处理
-        return _verification(payload)
-    finally:
-        if owned:
-            web.close()                                     # 只关闭自己创建的会话，不影响调用方复用连接
+    with HTTP(tries=2) as web:
+        response = web.post(SITEVERIFY_URL, data=data)      # 纯 HTTP 校验，不经过浏览器
+        return response.json()                              # {success, error-codes, challenge_ts, hostname}
 
 
-# --- 内部：Cloudflare JSON 转结构化结果 ---
-def _verification(payload):
-    return Verification(
-        success=bool(payload.get("success")),
-        errors=list(payload.get("error-codes") or []),
-        hostname=payload.get("hostname") or "",
-        action=payload.get("action") or "",
-        cdata=payload.get("cdata") or "",
-        challenge_ts=payload.get("challenge_ts") or "",
-        raw=dict(payload),
-    )
+# --- 封装获取+校验两步，适合多次调用 ---
+class TurnstileSolver:
+    """一个 sitekey 对应一个 solver 实例，复用浏览器配置。"""
+
+    def __init__(self, sitekey, url, proxy=None, headless=False):
+        # sitekey：目标站点的 Turnstile sitekey
+        # url：目标页面地址
+        # proxy / headless：传给 solve_turnstile 的浏览器配置
+        self.sitekey = sitekey
+        self.url = url
+        self.proxy = proxy
+        self.headless = headless
+
+    def solve(self, timeout=60):
+        # timeout：最长等待秒数
+        return solve_turnstile(self.sitekey, self.url, proxy=self.proxy, timeout=timeout, headless=self.headless)
+
+    def verify(self, secret, token, remoteip=None):
+        # secret：服务端 secret key
+        # token：solve 返回的 token
+        return verify_turnstile(secret, token, remoteip=remoteip)

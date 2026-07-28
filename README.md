@@ -34,12 +34,13 @@ from lazyfox import Browser, Mail, Person, Proxy, HTTP, AsyncHTTP, Log, Lines, T
 | `Mail` | 270+ 渠道临时邮箱 | 申请邮箱、筛选邮件、等待验证码/链接 |
 | `Person` | Faker 假身份 | 中英文姓名、密码、电话、地址，支持种子复现 |
 | `HTTP` / `AsyncHTTP` | 上游请求 | 会话复用、代理、重试、401/403 自动重新登录 |
-| `first_form` / `turnstile` / `result` | HTML 表单分析 | 提取 action、字段约束、Turnstile 配置和结果页摘要 |
-| `run_probes` / `form_cases` | 协议探针 | 批量提交字段变体并按响应语义聚类 |
-| `turnstile_audit` / `turnstile_verify` | Turnstile 协议 | 识别测试 key、构造提交体、调用 siteverify 解析结果 |
 | `parse` / `parse_async` | SSE 解析 | 同步和异步事件流统一解析 |
 | `Proxy` | OpenAI 代理骨架 | 自动提供 Chat Completions 和 Responses API |
 | `find_code` / `find_link` | 邮件提取 | 纯文本、HTML、分段码和链接转义 |
+| `scan_form` / `scan_forms` | 表单扫描 | 从 HTML 提取 action/method/字段/隐藏值，不靠浏览器 |
+| `scan_challenge` | 人机验证提取 | 识别 Turnstile/reCAPTCHA/hCaptcha 并提取 sitekey 和 token 字段名 |
+| `solve_turnstile` / `verify_turnstile` | Turnstile 验证 | 浏览器获取 token + 纯 HTTP siteverify 校验 |
+| `TurnstileSolver` | Turnstile 封装 | 复用 sitekey 的 solver 实例，支持多次获取和校验 |
 | `Lines` / `Table` | 结果保存 | token 去重、账号 JSON 保存 |
 | `Log` | 日志 | Rich 彩色终端、异常堆栈、文件输出 |
 
@@ -214,74 +215,6 @@ data = web.get("/api/private").json()                    # 401/403 时自动登�
 
 GET/HEAD/OPTIONS 默认可重试；POST、PUT 等可能产生副作用的请求默认只发送一次。
 确认上游支持幂等键或请求可安全重复时，显式传 `replay_safe=True`。
-
-逆向分析时，4xx/5xx 响应体经常包含关键错误原因。传 `check=False` 可保留失败响应而不抛异常：
-
-```python
-bad = web.post("/submit", data={"token": "fake"}, check=False, replay_safe=True)
-print(bad.status_code, bad.text)
-```
-
-## 表单协议分析
-
-```python
-from lazyfox import HTTP, first_form, result, turnstile
-
-web = HTTP(base="https://example.com")
-html = web.get("/").text
-
-form = first_form(html)                                  # 读取第一个 form 的 method/action/字段
-print(form.method, form.action)
-print(form.field("email").required)
-
-widget = turnstile(html)                                 # 读取 data-sitekey/data-theme 等配置
-print(widget.get("sitekey"))
-
-response = web.post(
-    form.action,
-    data=form.data(email="a@b.com", **{"cf-turnstile-response": "fake"}),
-    check=False,
-    replay_safe=True,
-)
-print(result(response.text).summary())                   # 提取 title/状态短语/主标题/说明文本
-```
-
-### 协议探针和 Turnstile 审计
-
-```python
-from lazyfox import HTTP, first_form, form_cases, groups, run_probes, turnstile_audit, turnstile_dummy, turnstile_verify
-
-web = HTTP(base="https://example.com")
-html = web.get("/").text
-form = first_form(html)
-widget = turnstile_audit(html)
-
-print(widget.sitekey, widget.mode, widget.dummy_allowed())  # 判断是否官方测试 key
-
-base = form.data(team="lazyfox", message="probe")
-base.pop("cf-turnstile-response", None)
-
-cases = form_cases(form.action, base)                    # 缺 token、假 token、JSON、query、重复字段等变体
-cases.append(cases[0].__class__(
-    "dummy-token",
-    path=form.action,
-    kwargs={"data": turnstile_dummy(base)},
-))
-
-findings = run_probes(web, cases)
-for bucket in groups(findings):
-    print([item.case for item in bucket], "=>", bucket[0].summary())
-
-check = turnstile_verify(
-    "XXXX.DUMMY.TOKEN.XXXX",
-    "1x0000000000000000000000000000000AA",                # Cloudflare 官方测试 secret
-)
-print(check.success, check.errors, check.hostname)
-```
-
-`turnstile_audit` 只识别配置和测试 key；`turnstile_verify` 只调用 Cloudflare 官方 `siteverify`。
-二者都不生成真实 Cloudflare token。生产 Turnstile token 必须由 Cloudflare 正常签发并由服务端
-`siteverify` 校验。
 
 ## 保存可靠性
 
