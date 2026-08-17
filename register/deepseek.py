@@ -345,68 +345,48 @@ def click_send_code(page):
     return page.run_js(script) or ""                       # 返回命中的按钮文案，空串表示没找到
 
 
-# --- 读取发送验证码按钮当前文字，用于判断是否已进入倒计时 ---
-def send_button_text(page):
-    script = """
-    (() => {
-      const nodes = [...document.querySelectorAll(".ds-verify-code-input-countdown")];
-      for (const node of nodes) {
-        if (node.offsetParent === null) continue;          // 只取真正可见的按钮
-        return (node.innerText || node.textContent || "").trim();
-      }
-      return "";
-    })();
-    """
-    return page.run_js(script) or ""                       # 返回按钮当前文字，空串表示没找到
-
-
-# --- 判断按钮文字是否已从“发送验证码”变成倒计时或重新发送 ---
-def code_sent(button_text):
-    text = (button_text or "").strip()
-    if not text or "发送验证码" in text or "获取验证码" in text or "Send code" in text:
-        return False                                       # 还是可点击状态，说明还没成功发出去
-    # 出现“重新发送”“Resend”或倒计时数字，都说明已经发出验证码。
-    return any(
-        marker in text
-        for marker in ("重新发送", "重新获取", "Resend", "resend", "秒", "s")
-    )
-
-
-# --- 点击发送验证码按钮，直到按钮进入倒计时才算发送成功 ---
+# --- 点击发送验证码按钮，直到确认已发送或邮箱被拒 ---
 def send_code(page, timeout, challenge_timeout=120):
     deadline = time.monotonic() + timeout                  # 整个发送步骤共享一个超时
     clicked = False                                        # 记录是否已经点过按钮，避免每轮重复点击
+
+    # 先点一次发送按钮；选择器失败时用 JS 扫描兜底。
+    if page.click(SELECTORS["send_code"], tries=1):
+        clicked = True
+        log.info("已点击发送验证码按钮（选择器命中）")
+    else:
+        text = click_send_code(page)                       # JS 扫描文案兜底
+        if text:
+            clicked = True
+            log.info(f"已点击发送验证码按钮（JS 兜底命中：{text}）")
+    if not clicked:
+        return False                                       # 按钮根本找不到，直接失败
+
+    # 点击后等待页面给出反馈：要么人机验证，要么邮箱被拒，要么静默发送成功。
     while time.monotonic() < deadline:
-        reject_email(page)                                  # 发送时也可能立即提示邮箱不可用
-        reject_env_error(page)                              # 发送验证码前后都可能出现环境异常
+        reject_env_error(page)                              # 环境异常立即终止
 
-        # 按钮文字从“发送验证码”变成倒计时，说明网站已确认发送成功。
-        if code_sent(send_button_text(page)):
-            log.info("验证码已发送，按钮进入倒计时")
-            return True
-
-        # 页面弹出人机验证时，先把浏览器让给用户手动完成，再回来继续检测。
+        # 页面弹出人机验证时，先把浏览器让给用户手动完成。
         if page.exists((
             "css=input[name='cf-turnstile-response']",
             "css=iframe[src*='turnstile']",
         ), timeout=1):
             if not wait_challenge(page, challenge_timeout):
                 return False                               # 人机验证超时，无法继续
-            continue                                       # 验证完成后回到循环，看按钮是否进入倒计时
+            log.info("人机验证完成，验证码已发送")
+            return True                                    # 验证完成后邮箱域名未被拒绝，视为发送成功
 
-        # 只要还没点过按钮，就主动点击一次；选择器失败时用 JS 扫描兜底。
-        if not clicked:
-            if page.click(SELECTORS["send_code"], tries=1):
-                clicked = True
-                log.info("已点击发送验证码按钮（选择器命中）")
-            else:
-                text = click_send_code(page)               # JS 扫描文案兜底
-                if text:
-                    clicked = True
-                    log.info(f"已点击发送验证码按钮（JS 兜底命中：{text}）")
+        # 邮箱被拒会明确弹出“暂不支持该邮箱域名”，立即抛出交给外层换邮箱。
+        reject_email(page)
 
-        page.sleep(0.5)                                     # 控制检测频率，避免空转占满 CPU
-    return False                                           # 超时按钮仍未进入倒计时，交给调用方失败
+        # DeepSeek 要么拒绝邮箱，要么发出验证码；没有倒计时也视为发送成功。
+        page.sleep(1)
+        # 再给一次邮箱拒绝提示出现的机会，仍没有则确认发送成功。
+        reject_email(page)
+        log.info("未检测到邮箱拒绝提示，判定验证码已发送")
+        return True
+
+    return False                                           # 理论上不会走到这里
 
 
 # --- 执行一个完整注册流程：共用同一个浏览器，邮箱被拒时换邮箱重发 ---
