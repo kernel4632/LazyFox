@@ -151,7 +151,7 @@ def make_email(mail, attempts=5):
             log.info(f"临时邮箱：{address}")               # 合法地址立即交给注册流程
             return address
         log.warning(f"邮箱域名被列入黑名单，第 {attempt}/{attempts} 次重新申请：{domain}")
-    raise RuntimeError("连续申请到被拒绝的临时邮箱域名")     # 有限重试后明确失败，不无限循环
+    raise EmailUnavailable("连续申请到被拒绝的临时邮箱域名")  # 让外层换邮箱重试，而不是终止流程
 
 
 # --- 判断邮箱域名是否在黑名单里，支持子域名后缀匹配 ---
@@ -409,20 +409,8 @@ def send_code(page, timeout, challenge_timeout=120):
     return False                                           # 超时按钮仍未进入倒计时，交给调用方失败
 
 
-# --- 执行一个完整注册流程 ---
+# --- 执行一个完整注册流程：共用同一个浏览器，邮箱被拒时换邮箱重发 ---
 def register(settings, browser_type=Browser, mail_type=Mail, person_type=Person, line_type=Lines, table_type=Table):
-    for attempt in range(1, settings.email_attempts + 1):  # 所有尝试仍受外层 flow_timeout 硬限制
-        try:
-            return register_once(settings, browser_type, mail_type, person_type, line_type, table_type)
-        except EmailUnavailable:
-            if attempt >= settings.email_attempts:
-                raise                                      # 用尽次数后保留明确错误
-            log.warning(f"邮箱域名被拒绝，准备更换邮箱重试 {attempt + 1}/{settings.email_attempts}")
-    raise RuntimeError("邮箱重试流程异常结束")              # 理论兜底
-
-
-# --- 使用一个新浏览器和新邮箱尝试注册一次 ---
-def register_once(settings, browser_type=Browser, mail_type=Mail, person_type=Person, line_type=Lines, table_type=Table):
     # 可替换的 type 参数让流程可以离线测试，真实运行保持零额外配置。
     person = person_type(lang="en").all()                  # 一次生成关联一致的姓名和密码
     channel = None if settings.mail_channel == "random" else settings.mail_channel
@@ -438,54 +426,61 @@ def register_once(settings, browser_type=Browser, mail_type=Mail, person_type=Pe
         proxy=settings.proxy,
         args=browser_args,
     ) as page:
-        try:
-            ready = page.open(SIGN_UP_URL, appear=SELECTORS["email"], tries=2, gap=1)
-            reject_blocked(page)                           # 先确认网络可访问，避免封禁节点白白申请临时邮箱
-            need(ready, "注册页没有出现邮箱输入框")
-            reject_phone_mode(page)                        # 手机号分流节点无法走邮箱流程，尽早失败
+        # 注册页只打开一次，邮箱被拒时也只刷新表单区域，不关浏览器。
+        ready = page.open(SIGN_UP_URL, appear=SELECTORS["email"], tries=2, gap=1)
+        reject_blocked(page)                               # 先确认网络可访问，避免封禁节点白白申请临时邮箱
+        need(ready, "注册页没有出现邮箱输入框")
+        reject_phone_mode(page)                            # 手机号分流节点无法走邮箱流程，尽早失败
 
-            with mail_type(channel=channel, proxy=settings.proxy, timeout=20) as mail:
-                email = make_email(mail)                    # 页面确认可注册后才申请真实邮箱
+        with mail_type(channel=channel, proxy=settings.proxy, timeout=20) as mail:
+            # 无限换邮箱循环：邮箱被拒就换一个再重发，直到注册成功或环境异常终止。
+            while True:
+                try:
+                    return register_once(page, mail, person, settings, line_type, table_type)
+                except EmailUnavailable:
+                    # 邮箱域名被拒或收不到验证码，都在同一浏览器内换邮箱重试，不关浏览器。
+                    mail.seen_ids.clear()                  # 清空旧邮箱的已读标记，避免干扰新邮箱
+                    mail.error = ""                        # 清空旧错误，等待下一轮重新填充
+                    log.warning("当前邮箱不可用，同一浏览器内更换邮箱后重发验证码")
 
-                fields = {
-                    SELECTORS["email"]: email,
-                    SELECTORS["password"]: person["password"],
-                    SELECTORS["password_again"]: person["password"],
-                }
-                need(page.fill_form(fields, verify=True, tries=3), "注册资料填写失败")
-                log.info(f"注册邮箱：{email}")
-                ensure_email_accepted(page)                 # 填写后立刻检查邮箱是否被页面接受
 
-                need(
-                    send_code(page, settings.page_timeout, settings.challenge_timeout),
-                    "发送验证码失败，按钮未进入倒计时",
-                )
+# --- 在已打开的浏览器内，用当前邮箱完成一次填表到提交 ---
+def register_once(page, mail, person, settings, line_type=Lines, table_type=Table):
+    email = make_email(mail)                               # 每次尝试都申请一个新邮箱
+    try:
+        fields = {
+            SELECTORS["email"]: email,
+            SELECTORS["password"]: person["password"],
+            SELECTORS["password_again"]: person["password"],
+        }
+        need(page.fill_form(fields, verify=True, tries=3), "注册资料填写失败")
+        log.info(f"注册邮箱：{email}")
+        ensure_email_accepted(page)                         # 填写后立刻检查邮箱是否被页面接受
 
-                code = wait_code(mail, timeout=settings.mail_timeout, interval=3, page=page)
-                if not code:
-                    detail = mail.error or "邮箱内无匹配邮件"
-                    raise EmailUnavailable(f"没有收到有效验证码：{detail}")
-                log.info(f"收到验证码：{code}")
+        need(
+            send_code(page, settings.page_timeout, settings.challenge_timeout),
+            "发送验证码失败，按钮未进入倒计时",
+        )
 
-                need(page.fill(SELECTORS["code"], code, verify=True, tries=3), "验证码填写失败")
-                token = submit_registration(page, settings.page_timeout)
-                need(token, "注册完成后没有找到 userToken")
-        except EmailRejected:
-            domain = email.rsplit("@", 1)[-1].lower()      # 从被拒邮箱里取出域名用于记录
-            record_bad_domain(domain)                       # 记录不可用域名后再向上抛，交给外层换邮箱重试
-            raise
-        except Exception:
-            shot = failure_path()                          # 每次失败使用独立截图名，便于排查选择器变化
-            page.shot(str(shot))                           # 截图失败不会覆盖原异常
-            log.error(f"注册失败截图：{shot}")
-            raise
+        code = wait_code(mail, timeout=settings.mail_timeout, interval=3, page=page)
+        if not code:
+            raise EmailUnavailable(f"没有收到有效验证码：{mail.error or '邮箱内无匹配邮件'}")
+        log.info(f"收到验证码：{code}")
 
-    line_type(settings.output).add(token)                  # 浏览器关闭后原子去重保存 token
-    table_type(settings.accounts).add(                      # 同时保存完整账号，方便下游直接登录
-        {"email": email, "password": person["password"], "token": token}
-    )
-    log.info(f"注册成功：{email}，token={token[:12]}...")
-    return {"email": email, "password": person["password"], "token": token}
+        need(page.fill(SELECTORS["code"], code, verify=True, tries=3), "验证码填写失败")
+        token = submit_registration(page, settings.page_timeout)
+        need(token, "注册完成后没有找到 userToken")
+
+        line_type(settings.output).add(token)              # 浏览器内直接原子去重保存 token
+        table_type(settings.accounts).add(                  # 同时保存完整账号，方便下游直接登录
+            {"email": email, "password": person["password"], "token": token}
+        )
+        log.info(f"注册成功：{email}，token={token[:12]}...")
+        return {"email": email, "password": person["password"], "token": token}
+    except EmailRejected:
+        domain = email.rsplit("@", 1)[-1].lower()          # 取出被拒邮箱的域名用于记录
+        record_bad_domain(domain)                           # 记录不可用域名后继续抛出，交给外层换邮箱
+        raise
 
 
 # --- 只检查注册页入口，不填写或提交 ---
